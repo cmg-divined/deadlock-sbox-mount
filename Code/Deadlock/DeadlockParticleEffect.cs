@@ -234,6 +234,15 @@ public sealed class DeadlockParticleEffect : Component, Component.ExecuteInEdito
 		}
 	}
 
+	/// <summary>
+	/// Adds the lights the effect's light renderers placed at its last step.
+	/// </summary>
+	internal void CollectLights( List<ParticleLight> output )
+	{
+		if ( renderer is not null && IsPlaying )
+			renderer.CollectLights( output );
+	}
+
 	private void PlaceControlPoints()
 	{
 		var origin = ControlPoints.Count > 0 && ControlPoints[0] is { IsValid: true } placed ? placed : GameObject;

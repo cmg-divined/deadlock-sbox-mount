@@ -380,6 +380,8 @@ public sealed class DeadlockHero : Component
 		animator.Renderer = body;
 		animator.UpdateAutomatically = false;
 		animator.Graph = FindGraph( model, Data.ModelName );
+
+		bodyObject.Components.Create<DeadlockNprOutline>();
 	}
 
 	/// <summary>

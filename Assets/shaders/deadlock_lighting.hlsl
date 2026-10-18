@@ -60,6 +60,16 @@ struct DeadlockBarnLight
 	float4 Parameters;		// min roughness, shadow strength, shadow filter radius, flags
 };
 
+struct DeadlockParticleLight
+{
+	float4 Position;		// w: reach
+	float4 Color;			// w: specular amount
+	float4 Falloff;			// saturate( 1 / ( x d² + y d + z ) - w )
+	float4 Fade;			// distance fade offset and rate (smoothstep), cone fade bias and scale (saturate)
+	float4 Direction;		// cone axis; w: 1 to measure distances to the luminaire rather than its centre
+	float4 Segment;			// half the luminaire
+};
+
 //
 // Scene attributes
 //
@@ -95,6 +105,10 @@ float4 g_vDeadlockSunShadowMask < Attribute( "DeadlockSunShadowMask" ); Default4
 
 int g_nDeadlockBarnLightCount < Attribute( "DeadlockBarnLightCount" ); Default( 0 ); >;
 StructuredBuffer<DeadlockBarnLight> g_DeadlockBarnLights < Attribute( "DeadlockBarnLights" ); >;
+
+// Lights particle effects place (DeadlockParticleLights), in map space.
+int g_nDeadlockParticleLightCount < Attribute( "DeadlockParticleLightCount" ); Default( 0 ); >;
+StructuredBuffer<DeadlockParticleLight> g_DeadlockParticleLights < Attribute( "DeadlockParticleLights" ); >;
 int g_nDeadlockShadowAtlas < Attribute( "DeadlockShadowAtlas" ); Default( 0 ); >;
 
 int g_nDeadlockBrdfLookup < Attribute( "DeadlockBrdfLookup" ); Default( 0 ); >;
@@ -375,6 +389,55 @@ bool DeadlockBarnLightAt( DeadlockBarnLight light, float3 position, float4 baked
 	return any( color != 0.0 );
 }
 
+// A particle light at a point: the engine's falloff, 1 / ( c + l d + q d² ) less what's left at its reach (light2
+// lights' is inverse square), with the distance at least a unit; a light2 skirt; and the cone, by the direction to
+// the nearest point of the luminaire, as light2 lights fade theirs.
+bool DeadlockParticleLightAt( DeadlockParticleLight light, float3 position, out float3 toLight, out float3 color )
+{
+	toLight = 0;
+	color = 0;
+
+	float3 delta = light.Position.xyz - position;
+	float3 segmentStart = delta - light.Segment.xyz;
+	float3 segmentDirection = 2.0 * light.Segment.xyz;
+	float along = dot( -segmentStart, segmentDirection );
+	float3 nearest = along <= 0.0 ? segmentStart : segmentStart + segmentDirection * min( 1.0, along / dot( segmentDirection, segmentDirection ) );
+
+	float3 measured = light.Direction.w > 0.0 ? nearest : delta;
+	float distanceSquared = dot( measured, measured );
+	if ( distanceSquared >= light.Position.w * light.Position.w )
+		return false;
+
+	distanceSquared = max( distanceSquared, 1.0 );
+	float distance = sqrt( distanceSquared );
+	toLight = measured * rsqrt( max( dot( measured, measured ), 1e-8 ) );
+
+	float falloff = saturate( 1.0 / max( light.Falloff.x * distanceSquared + light.Falloff.y * distance + light.Falloff.z, 1e-8 ) - light.Falloff.w );
+	falloff *= smoothstep( 0.0, 1.0, light.Fade.x + light.Fade.y * distance );
+	falloff *= saturate( light.Fade.z + light.Fade.w * dot( light.Direction.xyz, nearest * rsqrt( max( dot( nearest, nearest ), 1e-8 ) ) ) );
+
+	color = light.Color.rgb * falloff;
+	return any( color > 0.0 );
+}
+
+void DeadlockParticleLights( DeadlockSurface s, float3 toCamera, float roughness, float3 specularColor, float3 multiScatter, inout float3 diffuse, inout float3 specular )
+{
+	[loop]
+	for ( uint k = 0; k < (uint)g_nDeadlockParticleLightCount; k++ )
+	{
+		DeadlockParticleLight light = g_DeadlockParticleLights[k];
+
+		float3 toLight;
+		float3 color;
+		if ( !DeadlockParticleLightAt( light, s.Position, toLight, color ) )
+			continue;
+
+		float3 lightSpecular = 0;
+		DeadlockDirectLight( s.Normal, toCamera, toLight, roughness, specularColor, multiScatter, color, diffuse, lightSpecular );
+		specular += lightSpecular * light.Color.w;
+	}
+}
+
 void DeadlockBarnLights( DeadlockSurface s, float4 bakedShadows, float3 toCamera, float roughness, float3 specularColor, float3 multiScatter, inout float3 diffuse, inout float3 specular )
 {
 	DeadlockGridRange range = DeadlockGridLookup( s.Position, 1, (uint)g_nDeadlockBarnLightCount );
@@ -389,6 +452,8 @@ void DeadlockBarnLights( DeadlockSurface s, float4 bakedShadows, float3 toCamera
 		if ( DeadlockBarnLightAt( light, s.Position, bakedShadows, toLight, color ) )
 			DeadlockDirectLight( s.Normal, toCamera, toLight, max( roughness, light.Parameters.x ), specularColor, multiScatter, color, diffuse, specular );
 	}
+
+	DeadlockParticleLights( s, toCamera, max( roughness, 0.04 ), specularColor, multiScatter, diffuse, specular );
 }
 
 // The sun's visibility at a point: its channel of the baked shadows, and s&box's cascades for whatever moves.

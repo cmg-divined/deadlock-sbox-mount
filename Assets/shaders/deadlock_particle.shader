@@ -439,6 +439,15 @@ PS
 				direct += color;
 		}
 
+		[loop]
+		for ( uint p = 0; p < (uint)g_nDeadlockParticleLightCount; p++ )
+		{
+			float3 toLight;
+			float3 color;
+			if ( DeadlockParticleLightAt( g_DeadlockParticleLights[p], position, toLight, color ) )
+				direct += color;
+		}
+
 		return ambient + direct;
 	}
 

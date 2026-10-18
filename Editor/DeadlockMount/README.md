@@ -36,8 +36,9 @@ editor. `DeadlockMount.cs` and `Resource/` turn it into s&box resources. Shaders
 | `../../Assets/shaders/deadlock_parallax_layered.shader` | `environment_parallax_layered` (parallax windows). |
 | `../../Assets/shaders/deadlock_overlay.shader` | `citadel_overlay` (decals laid on the world as geometry). |
 | `../../Assets/shaders/deadlock_postprocess.shader` | Deadlock's `post_process`: exposure, bloom, vignette and its filmic tonemapping. |
+| `../../Assets/shaders/deadlock_bloom.shader` | Deadlock's bloom passes (`bloom_downsample`, `gaussian_blur_bloom`). |
 | `../../Code/Deadlock/Particles`, `Animation` | Ports of ValveResourceFormat's particle simulation and AnimGraph 2 runtime (Esoterica's), for the game code. |
-| `../../Code/Deadlock/` | Game side: the `Deadlock Hero` player (`DeadlockHero.cs`, `DeadlockHeroData.cs`), `Deadlock Animator`, `Deadlock Particle Effect`; the `DeadlockFlexRig` model data, its rule evaluator and the `Deadlock Flexes` component; `DeadlockBodyGroups` choice names and `SetDeadlockBodyGroup`; `DeadlockEntity` (map entity key values); the `Deadlock Map`, `Deadlock Map Lighting` and `Deadlock Post Processing` components. |
+| `../../Code/Deadlock/` | Game side: the `Deadlock Hero` player (`DeadlockHero.cs`, `DeadlockHeroData.cs`), `Deadlock Animator`, `Deadlock NPR Outline`, `Deadlock Bloom Layer`, `Deadlock Particle Effect`; `DeadlockMaterialExpressions`; the `DeadlockFlexRig` model data, its rule evaluator and the `Deadlock Flexes` component; `DeadlockBodyGroups` choice names and `SetDeadlockBodyGroup`; `DeadlockEntity` (map entity key values); the `Deadlock Map`, `Deadlock Map Lighting` and `Deadlock Post Processing` components. |
 
 The parsing follows ValveResourceFormat, and the meshoptimizer decoders are ported from its port.
 Both projects are MIT licensed.
@@ -49,7 +50,17 @@ Both projects are MIT licensed.
 - Textures: every format Deadlock uses. Every texture decodes (15085, all mips).
 - Materials: `pbr.vfx` (3187 materials: heroes and props) is ported. Albedo correction and tint, tint mask,
   vertex colour, metalness, roughness, packed normals, AO, self illumination with fresnel, texture scroll and
-  transforms, alpha test, translucency, additive and unlit.
+  transforms, alpha test (with the angle fade, vertex alpha and the alpha boost that thickens foliage with
+  distance), front face normals on back faces, translucency, additive, unlit, vertex jitter (`F_JITTER_VERTICES`:
+  ghosts, flames, ivy, cloth), depth written before blending (ghosts, smoke) and per material fog amounts (sky
+  clouds). `black.vfx` and `black_unlit.vfx` are unlit black.
+- Material dynamic expressions (a `vmat`'s DynamicParams, the game's bytecode) run through
+  `DeadlockMaterialExpressions`: constant ones replace their parameter, `time()` ones run every frame (the
+  scrolling water), and `$ent_random` ones (sign letters) give each placed object its own copy. Expressions
+  reading other attributes (set by game code) keep the material's own value.
+- Bloom amount override (`F_OVERRIDE_BLOOM_AMOUNT`: lamps, candles, neon, window facades): `Deadlock Bloom Layer`
+  draws those models again into s&box's quarter resolution bloom layer, their colour times the amount and self
+  illumination mask, which the bloom takes in without a threshold, as the game's G-buffer bloom mask does.
 - Face flexes: every mesh morph (position and normal deltas from the MRPH atlas) becomes an s&box morph of
   the same name, on every LOD. 111 meshes in 82 models have them: troopers, medics, WIP heroes and props.
   The flex controllers and the rules that turn them into morph weights are stored on the model as
@@ -103,8 +114,15 @@ Both projects are MIT licensed.
   your own and set its map name (`dl_midtown`...): like s&box's `MapInstance`, it loads the map's objects as
   unsaved children, visible in the editor and loaded again when the game starts, next to your player and camera.
 - Heroes (`F_USE_NPR_LIGHTING`) use Deadlock's NPR model: toon diffuse per light, the banded ambient
-  "bounce" with the transmissive colour on the unlit side, and the masked rim light. In a map they're lit by its
-  Deadlock lighting (probes, cubemaps, the sun and light2 lights), elsewhere by s&box's lights.
+  "bounce" with the transmissive colour on the unlit side, held to fixed brightnesses after exposure (exposure
+  control), and the masked rim light, hidden where the depth just outside the silhouette is close. In a map
+  they're lit by its Deadlock lighting (probes, cubemaps, the sun and light2 lights), elsewhere by s&box's lights.
+- NPR outlines: `Deadlock Hero` adds a `Deadlock NPR Outline`, which draws the model again through a hidden bone
+  merged renderer with outline copies of its NPR materials (`F_NPR_OUTLINE`): pushed out along the normals by the
+  material's outline mask, only the back faces around the silhouette. Maps add it to props with outlined NPR
+  materials (shrines, buttons, candles), and world geometry with them gets an outline model per cell. Materials with a solid outline
+  (`F_SOLID_COLOR_OUTLINE`, e.g. Abrams' orange, Drifter's dark red) multiply what's behind by their tint after
+  the opaque scene; the rest are lit with the albedo darkened towards the game's outline colours.
 - Map lighting, as Deadlock's deferred lighting pass does it (`deadlock_lighting.hlsl`, from the decompiled
   `deferred_lighting` compute shader): world geometry samples the second order harmonic lightmaps (with the ZH3
   sharpening) and its stationary lights' baked shadows; everything else the light probe ambient cube atlas.
@@ -116,10 +134,14 @@ Both projects are MIT licensed.
   space so the map can be placed anywhere.
 - World shaders: `environment_blend` (up to three layers, reveal masks, borders, UV and world overlays, biplanar
   layers), `environment_layer`, `environment_simple`, `environment_parallax_layered` windows, `citadel_overlay`
-  decals and `pbr` glass, each writing what the game's G-buffer holds before being lit.
+  decals and `pbr` glass (what's behind blurred over the game's nine tap disc and refracted, and self
+  illumination), each writing what the game's G-buffer holds before being lit. Aggregate fragments placed with a
+  scale get their texture coordinates scaled the way the game's vertex shader scales them by model scale.
 - Post processing: a map's `post_processing_volume` becomes a post process volume with `Deadlock Post Processing`
   (exposure fixed by the volume, the `.vpost`'s tonemapping curve, bloom and vignette). It replaces s&box's Tone
-  Mapping, so a camera shouldn't have both.
+  Mapping and Bloom, so a camera shouldn't have them too. The bloom is the game's (`deadlock_bloom.shader`): the
+  screen thresholded at a quarter of its size, halved four times, each level blurred with its four tap Gaussian
+  and summed back up by the `.vpost`'s blur weights. The vignette's constants are packed as the game packs them.
 - Fog: `env_gradient_fog`, `env_cubemap_fog`, `env_volumetric_fog_volume` and the fog controller's baked fog
   irradiance go on s&box's Source 2 fog (gradient, cubemap and volumetric).
 - Particles: every `.vpcf` simulates with a port of ValveResourceFormat's particle code (all 17670 systems match
@@ -127,6 +149,14 @@ Both projects are MIT licensed.
   `info_particle_system` entities play in maps; the `Deadlock Particle Effect` component plays any system. Beyond
   ValveResourceFormat: `C_OP_ClampVector`, `C_OP_BoxConstraint`, `C_OP_SetControlPointFieldToScalarExpression`, and
   `C_OP_CycleScalar` reading its set method (it was dropped, so "scale initial value" cycles replaced the value).
+- Particle lights: `C_OP_RenderStandardLight`, `C_OP_RenderOmni2Light` and `C_OP_RenderLightBeam` place lights as
+  particles.dll builds them (read with IDA): colour from the tint quantised to bytes and blended by the renderer's
+  blend type, then the engine's sRGB table; standard lights' classic attenuation (old style from the falloff
+  linearity, new style through the fifty and zero percent distances), range cut where they fall below 0.001 and
+  ended there; omni2 and beam lights as light2 omni and tube lights in lumens or candelas, the map's units. The
+  `DeadlockParticleLights` scene system gathers them every frame: the Deadlock shaders read them from a buffer of
+  their own while a map's Deadlock lighting is on, and everything s&box shades gets them as s&box lights (which
+  only fall off with the square of distance, so linear ones are matched at 100 units).
 - Animation: heroes play their AnimGraph 2 graphs (`hero.vnmgraph+<hero>`, with every child graph and clip) through
   a port of the AnimGraph 2 runtime, matching ValveResourceFormat's poses exactly. The `Deadlock Animator`
   component plays a model's graph and takes its parameters (`forward_speed`, `base_action`...).
@@ -164,14 +194,28 @@ Both projects are MIT licensed.
   checkerboard, so every texture a material leaves unset gets its shader's default.
 - dl_midtown's `*spawn_block_brush` walls, which keep heroes in base until the match starts, aren't loaded: maps
   load as they are during a match.
-- `generic` still falls back to `deadlock_pbr`.
+- `generic` still falls back to `deadlock_pbr` (3 small materials on the maps).
 
 ## Known limits
 
-- NPR settings (light wrap, step sharpness, rim strength...) are engine-wide values in Deadlock, not part of
-  materials. The defaults in `deadlock_pbr.shader` are tuned by eye; adjust the "NPR" group to taste.
-- Not ported from `pbr.vfx` yet: detail textures, sheen, advanced translucency, vertex jitter, cloak and status
-  effects, NPR outlines, stepped NPR specular and NPR exposure control.
+- NPR settings (light wrap, step sharpness, rim strength, outline colours...) are engine-wide values in Deadlock,
+  not part of materials. The defaults in `deadlock_pbr.shader` are the game's, from `materials/dev/npr_dummy.vmat`.
+- The game keeps hero outlines off the hero with the stencil; here outline pixels are dropped where a surface sits
+  just behind them (`g_flNprOutlineSelfDepth`), so an outline can show over a hero part a few units behind another.
+- Not ported from `pbr.vfx` yet: detail textures, sheen, advanced translucency, cloak and status effects, and
+  stepped NPR specular (off in the game's NPR settings). None of these are on the maps' materials but for a few
+  tiny detail textured ones.
+- The game lays translucent depth down in a pass of its own before blending (`F_WRITE_DEPTH_BEFORE_ALPHA_BLENDING`).
+  s&box has no order between two translucent draws, so these write depth while blending instead: a layer drawn
+  after a nearer one is kept out, one drawn before it still shows.
+- The game's camera clip capsule (the `r_citadel_clip_sphere_*` convars), which dithers away world geometry
+  between the camera and the hero, isn't ported: its values are set by game code.
+- Decals: the game keeps them off environment layers that don't accept overlays (`g_bAcceptStaticOverlays2`/`3`,
+  per pixel by the blend) and off translucent surfaces; here they land on everything under them.
+- Post processing: the colour correction LUT isn't applied (every map's is identity), and midtown's
+  `2392_post_processing` volume, which lets the exposure adapt within half a stop, stays at its middle.
+- The bloom layer is 10 bit; materials write their bloom as a fraction of `DeadlockPostProcess.BloomLayerRange` (64),
+  so brighter bloom clips there.
 - s&box vertices take 8 bit bone indices, so at most 256 bones can skin vertices. 19 hero models skin with
   more. Their most influential bones (and parents) get the first 256 slots and the rest skin to their nearest
   kept parent: identical in bind pose, but those bones won't deform on their own once animated.
@@ -185,8 +229,8 @@ Both projects are MIT licensed.
   down dashes, surface jump factors,
   abilities and weapons. Twist and helper bones that the graph's skeleton doesn't have (bone constraints in the
   game) hold their bind pose under their parents.
-- Particle renderers for lights, models, sounds and blobs, `C_OP_LockToBone`, path particle ropes (midtown's
-  cables) and snapshots aren't supported yet.
+- Particle renderers for models, sounds and blobs, `C_OP_RenderDeferredLight`, `C_OP_LockToBone`, path particle
+  ropes (midtown's cables) and snapshots aren't supported yet. Particle lights don't cast shadows or light fog.
 - Deadlock's distance field AO (an 8 bit screen texture its NPR and pbr shaders read) isn't ported.
 - s&box has 17 surfaces to Deadlock's 100 or so; each maps to the nearest by name, base surface or keyword.
   Collision attribute tags (`Citadel_BlockCamera`, `passbullets`...) aren't carried over.
@@ -222,5 +266,5 @@ Both projects are MIT licensed.
 
 1. Dynamic shadows for barn lights, area light shading, Deadlock's own volumetric fog.
 2. Port `generic` and the remaining `pbr.vfx` features.
-3. Particle lights and model particles, path particle ropes, distance field AO.
+3. Model particles, deferred particle lights, path particle ropes, distance field AO.
 4. Hero bone constraints (twist bones), ziplines, the sprint particle (needs particles on model bones).

@@ -100,9 +100,40 @@ internal sealed partial class ModelImporter
 		}
 
 		foreach ( var (chunk, part, fragment) in placements )
-			AppendFragment( chunk, part, fragment );
+			AppendFragment( chunk, part, fragment, fragment.Transform is null ? default : GetUvScale( part.Material ) );
 
 		return [.. chunks.Values];
+	}
+
+	/// <summary>
+	/// A material's texture coordinates scaled by its model's scale along an axis (the game's
+	/// g_nScaleTexCoord*ByModelScale* parameters), around an origin, so stretched pipes and cables keep their texel
+	/// size. 0 is no axis; 1 to 3 are x, y and z.
+	/// </summary>
+	private readonly record struct UvScaleByModel( int AxisU, int AxisV, float OriginU, float OriginV, int AxisU2, int AxisV2, float OriginU2, float OriginV2 )
+	{
+		public bool Any => AxisU != 0 || AxisV != 0 || AxisU2 != 0 || AxisV2 != 0;
+	}
+
+	private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, UvScaleByModel> UvScales = new( StringComparer.OrdinalIgnoreCase );
+
+	private UvScaleByModel GetUvScale( string material )
+	{
+		return UvScales.GetOrAdd( material ?? "", path =>
+		{
+			if ( path.Length == 0 || !mount.FileExists( path + "_c" ) )
+				return default;
+
+			var compiled = new CompiledMaterial( mount.ReadFile( path + "_c" ) );
+			float Get( string parameter, int fallback ) => compiled.GetInt( parameter, fallback );
+
+			// The origins as the game's expressions have them: the first set's V counts up from the bottom.
+			return new UvScaleByModel(
+				(int)Get( "g_nScaleTexCoordUByModelScaleAxis", 0 ), (int)Get( "g_nScaleTexCoordVByModelScaleAxis", 0 ),
+				Get( "g_nScaleTexCoordUByModelScaleOrigin", 0 ) / 2, 1 - Get( "g_nScaleTexCoordVByModelScaleOrigin", 2 ) / 2,
+				(int)Get( "g_nScaleTexCoord2UByModelScaleAxis", 0 ), (int)Get( "g_nScaleTexCoord2VByModelScaleAxis", 0 ),
+				Get( "g_nScaleTexCoord2UByModelScaleOrigin", 0 ) / 2, Get( "g_nScaleTexCoord2VByModelScaleOrigin", 2 ) / 2 );
+		} );
 	}
 
 	/// <summary>
@@ -134,9 +165,10 @@ internal sealed partial class ModelImporter
 	}
 
 	/// <summary>
-	/// Appends a copy of a draw call's geometry, transformed and tinted the way the fragment places it.
+	/// Appends a copy of a draw call's geometry, transformed and tinted the way the fragment places it, its texture
+	/// coordinates scaled by the transform's scale where the material asks.
 	/// </summary>
-	private static void AppendFragment( AggregateChunk chunk, MeshPart part, WorldAggregateFragment fragment )
+	private static void AppendFragment( AggregateChunk chunk, MeshPart part, WorldAggregateFragment fragment, UvScaleByModel uvScale )
 	{
 		var baseVertex = chunk.Vertices.Count;
 		var tint = fragment.TintColor;
@@ -170,6 +202,18 @@ internal sealed partial class ModelImporter
 		// Normals transform by the inverse transpose, so non-uniform scale keeps them perpendicular.
 		var normalMatrix = System.Numerics.Matrix4x4.Invert( a, out var inverse ) ? System.Numerics.Matrix4x4.Transpose( inverse ) : a;
 
+		// The scale along each axis, as the game's vertex shader measures it: the transform's column lengths.
+		var axisScales = new[]
+		{
+			1f,
+			MathF.Sqrt( m[0] * m[0] + m[4] * m[4] + m[8] * m[8] ),
+			MathF.Sqrt( m[1] * m[1] + m[5] * m[5] + m[9] * m[9] ),
+			MathF.Sqrt( m[2] * m[2] + m[6] * m[6] + m[10] * m[10] ),
+		};
+
+		// Only coordinates at or past 0 are scaled, as in the game.
+		float Scale( float value, int axis, float origin ) => axis != 0 && value >= 0 ? (value - origin) * axisScales[axis] + origin : value;
+
 		foreach ( var source in part.Vertices )
 		{
 			var vertex = tinted ? Tint( source, tint ) : source;
@@ -185,6 +229,12 @@ internal sealed partial class ModelImporter
 			var t = System.Numerics.Vector3.TransformNormal( new System.Numerics.Vector3( vertex.Tangent.x, vertex.Tangent.y, vertex.Tangent.z ), a );
 			var tangent = new Vector3( t.X, t.Y, t.Z ).Normal;
 			vertex.Tangent = new Vector4( tangent.x, tangent.y, tangent.z, determinant < 0 ? -vertex.Tangent.w : vertex.Tangent.w );
+
+			if ( uvScale.Any )
+			{
+				vertex.TexCoord0 = new Vector2( Scale( vertex.TexCoord0.x, uvScale.AxisU, uvScale.OriginU ), Scale( vertex.TexCoord0.y, uvScale.AxisV, uvScale.OriginV ) );
+				vertex.TexCoord1 = new Vector2( Scale( vertex.TexCoord1.x, uvScale.AxisU2, uvScale.OriginU2 ), Scale( vertex.TexCoord1.y, uvScale.AxisV2, uvScale.OriginV2 ) );
+			}
 
 			chunk.Vertices.Add( new DeadlockPackedVertex( vertex ) );
 			chunk.Min = Vector3.Min( chunk.Min, vertex.Position );
@@ -218,13 +268,14 @@ internal sealed partial class ModelImporter
 	}
 
 	/// <summary>
-	/// Uploads an aggregate chunk as a mesh with its material. Materials that don't read compact vertices (the
-	/// default material standing in for a missing one) get them unpacked to the full float layout.
+	/// Uploads an aggregate chunk as a mesh with its material, or <paramref name="material"/> in its place. Materials
+	/// that don't read compact vertices (the default material standing in for a missing one) get them unpacked to the
+	/// full float layout.
 	/// </summary>
 #pragma warning disable CS0618
-	public static Mesh CreateChunkMesh( DeadlockMount mount, AggregateChunk chunk, int textureLevel )
+	public static Mesh CreateChunkMesh( DeadlockMount mount, AggregateChunk chunk, int textureLevel, Material material = null )
 	{
-		var material = mount.LoadMaterial( chunk.Material, textureLevel );
+		material ??= mount.LoadMaterial( chunk.Material, textureLevel );
 		var mesh = new Mesh( chunk.Material, material );
 		var vertices = System.Runtime.InteropServices.CollectionsMarshal.AsSpan( chunk.Vertices );
 

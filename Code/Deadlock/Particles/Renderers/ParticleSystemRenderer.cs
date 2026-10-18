@@ -63,8 +63,29 @@ internal sealed class ParticleSystemRenderer : IParticleSystemObserver, IDisposa
 		"C_OP_RenderSprites" => new RenderSprites( parse, resource ),
 		"C_OP_RenderRopes" => new RenderRopes( parse, resource ),
 		"C_OP_RenderTrails" => new RenderTrails( parse, resource ),
+		"C_OP_RenderStandardLight" => new RenderStandardLight( parse ),
+		"C_OP_RenderOmni2Light" => new RenderOmni2Light( parse ),
+		"C_OP_RenderLightBeam" => new RenderLightBeam( parse ),
 		_ => null,
 	};
+
+	/// <summary>
+	/// Adds the lights this system's light renderers placed at its last step, and its running children's.
+	/// </summary>
+	public void CollectLights( List<ParticleLight> output )
+	{
+		foreach ( var renderer in renderers )
+		{
+			if ( renderer is ParticleLightRenderer lightRenderer )
+				output.AddRange( lightRenderer.Lights );
+		}
+
+		foreach ( var childRenderer in childRenderers )
+		{
+			if ( childRenderer.Simulation.ShouldRunAsChildOf( Simulation.RenderState ) )
+				childRenderer.CollectLights( output );
+		}
+	}
 
 	/// <summary>
 	/// How long each sequence of the first sheet this system's renderers draw with runs, or null without one.

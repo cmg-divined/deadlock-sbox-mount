@@ -1,3 +1,4 @@
+using Deadlock;
 using System;
 using NVector3 = System.Numerics.Vector3;
 
@@ -56,6 +57,8 @@ internal sealed class MaterialImporter( DeadlockMount mount, CompiledMaterial so
 			("g_tAmbientOcclusion", false, new( 1, 1, 1, 1 )),
 			("g_tRimLightMask", false, new( 1, 1, 1, 1 )),
 			("g_tNprTransmissiveColor", true, new( 0, 0, 0, 1 )),
+			("g_tNprOutlineMask", false, new( 1, 0, 0, 0 )),
+			("g_tJitterMask", false, new( 1, 0, 0, 0 )),
 		],
 		[EnvironmentShader] =
 		[
@@ -99,6 +102,7 @@ internal sealed class MaterialImporter( DeadlockMount mount, CompiledMaterial so
 			("g_tNormalRoughness", false, new( 0.5f, 0.5f, 1, 0 )),
 			("g_tTintMask", false, new( 1, 1, 1, 1 )),
 			("g_tGlass", false, new( 1, 1, 1, 1 )),
+			("g_tSelfIllumMask", false, new( 1, 1, 1, 1 )),
 		],
 		[VeilShader] =
 		[
@@ -163,6 +167,10 @@ internal sealed class MaterialImporter( DeadlockMount mount, CompiledMaterial so
 				SetupGeneric();
 				break;
 
+			case "black.vfx" or "black_unlit.vfx":
+				SetupBlack();
+				break;
+
 			default:
 				SetupLayer();
 				break;
@@ -173,8 +181,32 @@ internal sealed class MaterialImporter( DeadlockMount mount, CompiledMaterial so
 			_material.Attributes.Set( "PhysicsSurfaceProperties", mapped.ResourceName );
 
 		BindDefaultTextures( shader );
+		ApplyDynamicParams();
 
 		return _material;
+	}
+
+	/// <summary>
+	/// The material's dynamic expressions, for the parameters the shaders have a place for: a constant one replaces
+	/// its parameter, a time() one runs every frame (scrolling water), and an $ent_random one waits for each object
+	/// that uses the material (see MapLoader). Ones reading other attributes keep the material's own value.
+	/// </summary>
+	private void ApplyDynamicParams()
+	{
+		foreach ( var (parameter, code) in source.DynamicParams )
+		{
+			if ( DeadlockMaterialExpressions.UsesAttribute( code, DeadlockMaterialExpressions.EntRandom ) )
+			{
+				DeadlockMaterialExpressions.PerEntity( _material, parameter, code );
+				continue;
+			}
+
+			if ( DeadlockMaterialExpressions.Evaluate( code, 0 ) is not { } value || !DeadlockMaterialExpressions.Apply( _material, parameter, value ) )
+				continue;
+
+			if ( DeadlockMaterialExpressions.UsesTime( code ) )
+				DeadlockMaterialExpressions.Animate( _material, parameter, code );
+		}
 	}
 
 	/// <summary>
@@ -247,6 +279,7 @@ internal sealed class MaterialImporter( DeadlockMount mount, CompiledMaterial so
 		SetFeature( "F_TRANSLUCENT", translucent );
 		SetFeature( "F_ALPHA_TEST", alphaTest );
 		SetFeature( "F_ADDITIVE_BLEND", translucent && Combo( "F_ADDITIVE_BLEND" ) );
+		SetFeature( "F_WRITE_DEPTH_BEFORE_ALPHA_BLENDING", translucent && Combo( "F_WRITE_DEPTH_BEFORE_ALPHA_BLENDING" ) );
 		SetFeature( "F_RENDER_BACKFACES", Combo( "F_RENDER_BACKFACES" ) );
 		SetFeature( "F_DO_NOT_CAST_SHADOWS", Combo( "F_DO_NOT_CAST_SHADOWS" ) );
 
@@ -266,6 +299,7 @@ internal sealed class MaterialImporter( DeadlockMount mount, CompiledMaterial so
 			BindMask( "g_tTintMask", "g_tTintMaskRimLightMask", Red, "g_vTintMaskChannel" );
 			BindMask( "g_tRimLightMask", "g_tTintMaskRimLightMask", Green, "g_vRimLightMaskChannel" );
 			BindTexture( "g_tNprTransmissiveColor", "g_tNprTransmissiveColor" );
+			SetupNprOutline( translucent || unlit );
 		}
 		else
 		{
@@ -284,7 +318,74 @@ internal sealed class MaterialImporter( DeadlockMount mount, CompiledMaterial so
 		_material.Set( "g_flAlphaTestReference", Float( "g_flAlphaTestReference1", 0.5f ) );
 		_material.Set( "g_flOpacityScale", Float( "g_flOpacityScale1", 1f ) );
 		_material.Set( "g_flAlphaAnglePower", Float( "g_flAlphaAnglePower1", 0f ) );
+		_material.Set( "g_flAlphaBoostStrength", Float( "g_flAlphaBoostStrength", 3f ) );
+		_material.Set( "g_flAlphaBoostDistance", MathF.Max( Float( "g_flAlphaBoostDistance", 20000f ), 1f ) );
+		_material.Set( "g_flUseFrontFaceNormalsForBackFaces", Combo( "F_USE_FRONT_FACE_NORMALS_FOR_BACK_FACES" ) ? 1f : 0f );
 		_material.Set( "g_flUnlitAdditiveScale", Float( "g_flUnlitAdditiveScale1", 1f ) );
+
+		// Blooms by its colour times this and the self illumination mask, unthresholded (Deadlock Bloom Layer).
+		_material.Set( "g_flBloomAmount", Combo( "F_OVERRIDE_BLOOM_AMOUNT" ) && !translucent ? Float( "g_flOverrideBloomAmount1", 1f ) : 0f );
+
+		// The game spells the cubemap one "Cubmap".
+		_material.Set( "g_flGradientFogAmount", Float( "g_flGradientFogAmount", 1f ) );
+		_material.Set( "g_flCubemapFogAmount", Float( "g_flCubmapFogAmount", 1f ) );
+		_material.Set( "g_flVolumeFogAmount", Float( "g_flVolumeFogAmount", 1f ) );
+
+		SetupJitter();
+	}
+
+	/// <summary>
+	/// F_JITTER_VERTICES: the vertices wobble by two waves through their world (1) or object (2) position. The
+	/// fallbacks are the game shader's defaults.
+	/// </summary>
+	private void SetupJitter()
+	{
+		var mode = (int)Math.Clamp( source.GetInt( "F_JITTER_VERTICES" ), 0, 2 );
+		_material.SetFeature( "F_JITTER_VERTICES", mode );
+
+		if ( mode == 0 )
+			return;
+
+		BindTexture( "g_tJitterMask", "g_tJitterMask" );
+		SetBool( "g_flJitterMaskSecondaryUv", "g_bUseSecondaryUvForJitterMask" );
+		_material.Set( "g_flJitterSynchronize", source.GetInt( "g_bSynchronizeJitter1", 1 ) != 0 ? 1f : 0f );
+		_material.Set( "g_flJitterQuantizeTime", Float( "g_flJitterQuantizeTime1", 0f ) );
+		_material.Set( "g_flJitterQuantizeDisplacement", Float( "g_flJitterQuantizeDisplacement1", 0f ) );
+		_material.Set( "g_vJitterExpression", GetVector3( "g_vJitterExpression", 0 ) );
+
+		_material.Set( "g_vJitterFrequenciesA", GetVector3( "g_vJitterFrequenciesA1", 0.02f, 0.04f, 0.08f ) );
+		_material.Set( "g_vJitterAmplitudesXA", GetVector3( "g_vJitterAmplitudesXA1", 4 ) );
+		_material.Set( "g_vJitterAmplitudesYA", GetVector3( "g_vJitterAmplitudesYA1", 0 ) );
+		_material.Set( "g_vJitterAmplitudesZA", GetVector3( "g_vJitterAmplitudesZA1", 0 ) );
+		_material.Set( "g_flJitterSpeedA", Float( "g_flJitterSpeedA1", 10f ) );
+
+		_material.Set( "g_vJitterFrequenciesB", GetVector3( "g_vJitterFrequenciesB1", 0.05f, 0.09f, 0.17f ) );
+		_material.Set( "g_vJitterAmplitudesXB", GetVector3( "g_vJitterAmplitudesXB1", 0 ) );
+		_material.Set( "g_vJitterAmplitudesYB", GetVector3( "g_vJitterAmplitudesYB1", 0 ) );
+		_material.Set( "g_vJitterAmplitudesZB", GetVector3( "g_vJitterAmplitudesZB1", 0 ) );
+		_material.Set( "g_flJitterSpeedB", Float( "g_flJitterSpeedB1", 7f ) );
+	}
+
+	/// <summary>
+	/// The outline pass's settings (drawn by the Deadlock NPR Outline component): pbr.vfx draws a lit outline, a
+	/// solid colour one, or none, as thick as the global setting (npr_dummy.vmat's 0.1) unless the material overrides it.
+	/// </summary>
+	private void SetupNprOutline( bool seeThrough )
+	{
+		var enabled = !seeThrough && !Combo( "F_DISABLE_NPR_OUTLINE" ) && !Combo( "F_CLOAK" ) && !Combo( "F_GLASS" );
+
+		BindTexture( "g_tNprOutlineMask", "g_tNprOutlineMask" );
+		_material.Set( "g_flNprOutlineEnabled", enabled ? 1f : 0f );
+		_material.Set( "g_flNprOutlineThickness", Combo( "F_OVERRIDE_NPR_OUTLINE" ) ? Float( "g_flOverrideNprOutlineThickness", 0.2f ) : 0.1f );
+
+		var solid = Combo( "F_SOLID_COLOR_OUTLINE" );
+		_material.Set( "g_flNprSolidOutline", solid ? 1f : 0f );
+
+		if ( solid )
+		{
+			var tint = GetVector3( "g_vSolidOutlineTint", 0.1f );
+			_material.Set( "g_vNprSolidOutlineTint", new Vector3( ColorMatrices.SrgbToLinear( tint.x ), ColorMatrices.SrgbToLinear( tint.y ), ColorMatrices.SrgbToLinear( tint.z ) ) );
+		}
 	}
 
 	/// <summary>
@@ -447,7 +548,8 @@ internal sealed class MaterialImporter( DeadlockMount mount, CompiledMaterial so
 	}
 
 	/// <summary>
-	/// pbr.vfx with F_GLASS, on deadlock_glass.shader: g_tGlass says how much of what's behind shows through.
+	/// pbr.vfx with F_GLASS, on deadlock_glass.shader: g_tGlass says how much of what's behind shows through, blurred
+	/// and refracted by the game's cloak parameters.
 	/// </summary>
 	private void SetupGlass()
 	{
@@ -460,6 +562,14 @@ internal sealed class MaterialImporter( DeadlockMount mount, CompiledMaterial so
 
 		SetAlbedoAdjustments( "1", "g_tColor" );
 		_material.Set( "g_flGlassReflectance", Float( "g_flGlassReflectance1", 0.04f ) );
+
+		if ( Combo( "F_SELF_ILLUM" ) )
+			SetupSelfIllum( "g_tSelfIllumMask", Red );
+
+		_material.Set( "g_flGlassBlur", Float( "g_flCloakBlurAmount", 0.005f ) );
+		_material.Set( "g_vGlassBlurRoughnessFactors", new Vector2( Float( "g_flCloakBlurFactorMinRoughness", 1f ), Float( "g_flCloakBlurFactorMaxRoughness", 1f ) ) );
+		_material.Set( "g_flGlassBlurNoise", Float( "g_flCloakBlurNoiseAmount", 0.5f ) );
+		_material.Set( "g_flGlassRefract", Float( "g_flCloakRefractAmount", 0.075f ) * Float( "g_flCloakFactor1", 1f ) * Float( "g_flFullyCloakedRefractFactor1", 1f ) );
 	}
 
 	/// <summary>
@@ -496,6 +606,9 @@ internal sealed class MaterialImporter( DeadlockMount mount, CompiledMaterial so
 		_material.Set( "g_flReflectionOcclusionOffset", Float( "g_flReflectionOcclusionOffset", 0f ) / 1024f );
 		_material.Set( "g_flReflectionOcclusionViewAngleLimit", Float( "g_flReflectionOcclusionViewAngleLimit", 0.5f ) );
 		SetBool( "g_flReflectionOcclusionUseSecondaryUv", "g_bReflectionOcclusionUseSecondaryUV" );
+
+		// The lit windows bloom by their colour times this and their glow, unthresholded (Deadlock Bloom Layer).
+		_material.Set( "g_flBloomAmount", Combo( "F_OVERRIDE_BLOOM_AMOUNT" ) ? Float( "g_flOverrideBloomAmount1", 1f ) : 0f );
 	}
 
 	private Vector3 EmissiveTint( string tintParameter, string levelParameter )
@@ -610,6 +723,18 @@ internal sealed class MaterialImporter( DeadlockMount mount, CompiledMaterial so
 
 		if ( Combo( "F_SELF_ILLUM" ) )
 			SetupSelfIllum( "g_tSelfIllumMask", Red );
+	}
+
+	/// <summary>
+	/// black.vfx and black_unlit.vfx: plain black that nothing lights.
+	/// </summary>
+	private void SetupBlack()
+	{
+		SetFeature( "F_UNLIT", true );
+		SetFeature( "F_RENDER_BACKFACES", Combo( "F_RENDER_BACKFACES" ) );
+
+		_material.Set( "g_tColor", SolidTexture( new Vector4( 0, 0, 0, 1 ), true ) );
+		_boundTextures.Add( "g_tColor" );
 	}
 
 	private void SetupSelfIllum( string maskParameter, float[] channel )
@@ -735,9 +860,11 @@ internal sealed class MaterialImporter( DeadlockMount mount, CompiledMaterial so
 		return new Vector2( value[0], value[1] );
 	}
 
-	private Vector3 GetVector3( string parameter, float fallback )
+	private Vector3 GetVector3( string parameter, float fallback ) => GetVector3( parameter, fallback, fallback, fallback );
+
+	private Vector3 GetVector3( string parameter, float x, float y, float z )
 	{
-		var value = source.GetVector( parameter, [fallback, fallback, fallback, fallback] );
+		var value = source.GetVector( parameter, [x, y, z, 0] );
 		return new Vector3( value[0], value[1], value[2] );
 	}
 }

@@ -199,6 +199,7 @@ internal sealed partial class MapLoader
 			if ( skin is not null )
 				prop.MaterialGroup = skin;
 
+			AddPassComponents( gameObject, model );
 			return;
 		}
 
@@ -218,6 +219,9 @@ internal sealed partial class MapLoader
 
 			if ( entity.GetBool( "disableshadows" ) )
 				renderer.RenderType = ModelRenderer.ShadowRenderType.Off;
+
+			ApplyEntityRandom( renderer );
+			AddPassComponents( gameObject, model );
 		}
 
 		if ( model.Physics is not { Parts.Count: > 0 } )

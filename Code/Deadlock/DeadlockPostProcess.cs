@@ -37,7 +37,17 @@ public sealed class DeadlockPostProcess : BasePostProcess<DeadlockPostProcess>
 	/// </summary>
 	[Property, Group( "Bloom" )] public BloomBlend BloomMode { get; set; } = BloomBlend.Add;
 	[Property, Group( "Bloom" )] public float BloomStrength { get; set; } = 0.5f;
+
+	/// <summary>
+	/// Where the bloom starts and how far over it a pixel blooms fully, in exposed luminance.
+	/// </summary>
 	[Property, Group( "Bloom" )] public float BloomThreshold { get; set; } = 1f;
+	[Property, Group( "Bloom" )] public float BloomThresholdWidth { get; set; } = 0.999f;
+
+	/// <summary>
+	/// How much of each blur level the bloom takes, from a quarter of the screen down to a 64th.
+	/// </summary>
+	[Property, Group( "Bloom" )] public List<float> BloomWeights { get; set; } = [0, 0.070259f, 0.181076f, 0.300013f, 0.448652f];
 
 	/// <summary>
 	/// Negative darkens the edges of the screen, positive brightens them.
@@ -60,13 +70,20 @@ public sealed class DeadlockPostProcess : BasePostProcess<DeadlockPostProcess>
 	}
 
 	private static readonly Material Shader = Material.FromShader( "shaders/deadlock_postprocess.shader" );
-	private static readonly ComputeShader BloomShader = new( "postprocess/postprocess_bloom_cs" );
+	private static readonly Material BloomShader = Material.FromShader( "shaders/deadlock_bloom.shader" );
 
-	// Half resolution down to a 64th.
-	private const int BloomMips = 6;
-	private static readonly string[] BloomMipNames = ["DeadlockBloom0", "DeadlockBloom1", "DeadlockBloom2", "DeadlockBloom3", "DeadlockBloom4", "DeadlockBloom5"];
+	// A quarter of the screen down to a 64th.
+	private const int BloomLevels = 5;
+	private static readonly string[] BloomLevelNames = ["DeadlockBloom0", "DeadlockBloom1", "DeadlockBloom2", "DeadlockBloom3", "DeadlockBloom4"];
+	private static readonly string[] BloomBlurNames = ["DeadlockBloomBlur0", "DeadlockBloomBlur1", "DeadlockBloomBlur2", "DeadlockBloomBlur3", "DeadlockBloomBlur4"];
 
-	private readonly CommandList _commands = new( "Deadlock Post Processing" );
+	/// <summary>
+	/// The bloom layer (Deadlock Bloom Layer) is 10 bit: materials write their bloom as a fraction of this.
+	/// </summary>
+	public const float BloomLayerRange = 64;
+
+	// Made on first use: a hot reload can leave an existing component without it.
+	private CommandList _commands;
 	private bool _warned;
 
 	public override void Render()
@@ -80,19 +97,23 @@ public sealed class DeadlockPostProcess : BasePostProcess<DeadlockPostProcess>
 			Log.Warning( $"{Camera.GameObject.Name} has both Tone Mapping and Deadlock Post Processing; the image gets tonemapped twice. Disable Tone Mapping." );
 		}
 
+		_commands ??= new CommandList( "Deadlock Post Processing" );
 		_commands.Reset();
 
 		var color = _commands.Attributes.GrabFrameTexture( "ColorBuffer" );
 		var bloomStrength = GetWeighted( x => x.BloomStrength, 0 );
 
 		if ( bloomStrength > 0 )
-			RenderBloom( color );
+			RenderBloom( color, bloomStrength );
 
 		var exposure = MathF.Pow( 2, GetWeighted( x => x.Exposure, 0 ) + GetWeighted( x => x.ExposureBias, 0 ) );
 		_commands.Attributes.Set( "Exposure", exposure );
 
-		// The bloom accumulates every level into the top one; the game's strength is for their average.
-		var bloom = bloomStrength / BloomMips;
+		// Heroes' NPR bounce light is held to fixed brightnesses after this exposure.
+		Scene.RenderAttributes.Set( "DeadlockExposure", exposure );
+
+		// The bloom texture already has the strength in it; it goes on added or screened.
+		var bloom = bloomStrength > 0 ? 1f : 0f;
 		var screen = GetWeighted( x => x.BloomMode == BloomBlend.Screen ? 1f : 0f, 0 );
 		_commands.Attributes.Set( "BloomAdd", bloom * (1 - screen) );
 		_commands.Attributes.Set( "BloomScreen", bloom * screen );
@@ -110,62 +131,83 @@ public sealed class DeadlockPostProcess : BasePostProcess<DeadlockPostProcess>
 		_commands.Attributes.Set( "TonemapCurve", new Vector4( shoulder, linear, angle, toe ) );
 		_commands.Attributes.Set( "TonemapToe", new Vector4( toeNumerator, toeDenominator, white, 1 / Curve( white ) ) );
 
+		// Packed as the game packs them: negative strengths darken the edges by up to all of it, positive ones add
+		// 3 s^2; the feather is twice as wide; roundness 0 to 1 takes the superellipse from exponent 8 to 2.
 		var strength = GetWeighted( x => x.VignetteStrength, 0 );
-		var roundness = MathF.Max( GetWeighted( x => x.VignetteRoundness, 1 ), 0.01f );
-		var exponent = 2 / roundness;
+		var darken = Math.Clamp( -strength, 0f, 1f );
+		var brighten = Math.Clamp( strength, 0f, 1f );
+		var exponent = 2 / (0.25f + 0.75f * Math.Clamp( GetWeighted( x => x.VignetteRoundness, 1 ), 0f, 1f ));
 
 		_commands.Attributes.Set( "Vignette", strength != 0 ? 1f : 0f );
 		var center = GetWeighted( x => x.VignetteCenter, Vector2.Zero );
-		_commands.Attributes.Set( "VignetteCenter", new Vector4( center.x, center.y, strength < 0 ? 1 + strength : 1 - strength, MathF.Max( strength, 0 ) ) );
+		_commands.Attributes.Set( "VignetteCenter", new Vector4( center.x, -center.y, 1 - darken, 3 * brighten * brighten ) );
 		_commands.Attributes.Set( "VignetteTint", GetWeighted( x => x.VignetteTint, Color.White ) );
-		_commands.Attributes.Set( "VignetteShape", new Vector4( GetWeighted( x => x.VignetteRadius, 0.5f ), GetWeighted( x => x.VignetteFeather, 0.5f ), exponent, -1 / exponent ) );
+		_commands.Attributes.Set( "VignetteShape", new Vector4( MathF.Max( GetWeighted( x => x.VignetteRadius, 0.5f ), 0.01f ), MathF.Max( 2 * GetWeighted( x => x.VignetteFeather, 0.5f ), 0.001f ), exponent, -1 / exponent ) );
 
 		_commands.Blit( Shader );
 		InsertCommandList( _commands, Stage.Tonemapping, 0, "Deadlock Post Processing" );
 	}
 
 	/// <summary>
-	/// Thresholds the image and blurs it down and back up, into the first level.
+	/// The game's bloom: the screen thresholded at a quarter of its size (four taps, each by how far its exposed
+	/// luminance passes the threshold), plus the bloom layer; halved four times; each level blurred across and down;
+	/// then the levels summed back up by their weights, into the first.
 	/// </summary>
-	private void RenderBloom( RenderTargetHandle color )
+	private void RenderBloom( RenderTargetHandle color, float strength )
 	{
-		var mip0 = _commands.GetRenderTarget( BloomMipNames[0], 2, ImageFormat.RGBA16161616F, ImageFormat.None );
-		var mip1 = _commands.GetRenderTarget( BloomMipNames[1], 4, ImageFormat.RGBA16161616F, ImageFormat.None );
-		var mip2 = _commands.GetRenderTarget( BloomMipNames[2], 8, ImageFormat.RGBA16161616F, ImageFormat.None );
-		var mip3 = _commands.GetRenderTarget( BloomMipNames[3], 16, ImageFormat.RGBA16161616F, ImageFormat.None );
-		var mip4 = _commands.GetRenderTarget( BloomMipNames[4], 32, ImageFormat.RGBA16161616F, ImageFormat.None );
-		var mip5 = _commands.GetRenderTarget( BloomMipNames[5], 64, ImageFormat.RGBA16161616F, ImageFormat.None );
+		var threshold = GetWeighted( x => x.BloomThreshold, 1 );
+		var width = MathF.Max( GetWeighted( x => x.BloomThresholdWidth, 0.999f ), 0.001f );
+		_commands.Attributes.Set( "BloomThreshold", new Vector2( 1 / width, -threshold / width ) );
+		_commands.Attributes.Set( "BloomExposure", MathF.Pow( 2, GetWeighted( x => x.Exposure, 0 ) ) );
+		_commands.Attributes.Set( "BloomScale", strength );
+		_commands.Attributes.Set( "BloomEffectsRange", BloomLayerRange );
 
-		_commands.Attributes.Set( "Threshold", GetWeighted( x => x.BloomThreshold, 1 ) );
+		var bloom = BloomLevel( 0, color );
 
-		// Threshold, full resolution to half.
-		_commands.Attributes.SetCombo( "D_STAGE", 0 );
-		BloomPass( color, mip0, ResourceState.NonPixelShaderResource );
-
-		// Down.
-		_commands.Attributes.SetCombo( "D_STAGE", 1 );
-		BloomPass( mip0, mip1, ResourceState.NonPixelShaderResource );
-		BloomPass( mip1, mip2, ResourceState.NonPixelShaderResource );
-		BloomPass( mip2, mip3, ResourceState.NonPixelShaderResource );
-		BloomPass( mip3, mip4, ResourceState.NonPixelShaderResource );
-		BloomPass( mip4, mip5, ResourceState.NonPixelShaderResource );
-
-		// Up, each level adding the one below.
-		_commands.Attributes.SetCombo( "D_STAGE", 2 );
-		BloomPass( mip5, mip4, ResourceState.NonPixelShaderResource );
-		BloomPass( mip4, mip3, ResourceState.NonPixelShaderResource );
-		BloomPass( mip3, mip2, ResourceState.NonPixelShaderResource );
-		BloomPass( mip2, mip1, ResourceState.NonPixelShaderResource );
-		BloomPass( mip1, mip0, ResourceState.PixelShaderResource );
-
-		_commands.Attributes.Set( "BloomTexture", mip0.ColorTexture );
+		_commands.ClearRenderTarget();
+		_commands.Attributes.Set( "BloomTexture", bloom.ColorTexture );
 	}
 
-	private void BloomPass( RenderTargetHandle input, RenderTargetHandle output, ResourceState after )
+	/// <summary>
+	/// One level: made from the one above it (the screen, for the first), blurred, then summed with the levels below
+	/// it, into its blur target, which comes back. The smallest comes back blurred only, for its weight to go on above.
+	/// </summary>
+	private RenderTargetHandle BloomLevel( int level, RenderTargetHandle above )
 	{
-		_commands.Attributes.Set( "InputTexture", input.ColorTexture );
-		_commands.Attributes.Set( "BloomOut", output.ColorTexture );
-		_commands.DispatchCompute( BloomShader, output.Size );
-		_commands.ResourceBarrierTransition( output, after );
+		// Temporary targets are sized from the viewport bound when they're made, which the level above left at its own
+		// size: back to the view's first.
+		_commands.ClearRenderTarget();
+
+		var target = _commands.GetRenderTarget( BloomLevelNames[level], 4 << level, ImageFormat.RGBA16161616F, ImageFormat.None );
+		var blur = _commands.GetRenderTarget( BloomBlurNames[level], 4 << level, ImageFormat.RGBA16161616F, ImageFormat.None );
+
+		BloomPass( level == 0 ? 0 : 1, above, target );
+		BloomPass( 2, target, blur );
+		BloomPass( 3, blur, target );
+
+		if ( level == BloomLevels - 1 )
+			return target;
+
+		var below = BloomLevel( level + 1, target );
+
+		_commands.Attributes.Set( "BloomLevel", target.ColorTexture );
+		_commands.Attributes.Set( "BloomBelowWeight", level + 1 == BloomLevels - 1 ? BloomWeight( level + 1 ) : 1f );
+		_commands.Attributes.Set( "BloomLevelWeight", BloomWeight( level ) );
+		BloomPass( 4, below, blur );
+
+		return blur;
+	}
+
+	private float BloomWeight( int level ) => GetWeighted( x => x.BloomWeights is { } weights && level < weights.Count ? weights[level] : 0f, 0 );
+
+	private void BloomPass( int pass, RenderTargetHandle source, RenderTargetHandle target )
+	{
+		_commands.SetRenderTarget( target );
+		_commands.Attributes.SetCombo( "D_PASS", pass );
+		_commands.Attributes.Set( "BloomSource", source.ColorTexture );
+		_commands.Attributes.Set( "BloomSourceInvSize", source.Size, true );
+		_commands.Attributes.Set( "BloomTargetInvSize", target.Size, true );
+		_commands.Blit( BloomShader );
+		_commands.ResourceBarrierTransition( target, ResourceState.PixelShaderResource );
 	}
 }

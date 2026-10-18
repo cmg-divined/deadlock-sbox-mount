@@ -14,6 +14,7 @@ HEADER
 FEATURES
 {
 	#include "common/features.hlsl"
+	Feature( F_BLOOM_LAYER, 0..1, "Deadlock" );
 }
 
 MODES
@@ -61,11 +62,27 @@ VS
 
 PS
 {
+	// The bloom layer copy (Deadlock Bloom Layer), as deadlock_pbr has it: what the bloom amount override blooms.
+	StaticCombo( S_BLOOM_LAYER, F_BLOOM_LAYER, Sys( ALL ) );
+
+	#if S_BLOOM_LAYER
+		#define DEPTH_STATE_ALREADY_SET 1
+	#endif
+
 	// sbox_pixel supplies culling; suppress the duplicate declaration in vr_common_ps_code.
 	#define CULL_MODE_ALREADY_SET
 	#include "common/pixel.hlsl"
 	#include "common/classes/Light.hlsl"
 	#include "deadlock_lighting.hlsl"
+
+	#if S_BLOOM_LAYER
+		RenderState( DepthEnable, false );
+		RenderState( DepthWriteEnable, false );
+	#endif
+
+	// F_OVERRIDE_BLOOM_AMOUNT: these pixels bloom by their colour times amount times the windows' glow (up to 20).
+	float g_flBloomAmount < Default( 0 ); >;
+	#define BLOOM_LAYER_RANGE 64.0
 
 	CreateInputTexture2D( DeadlockColor, Srgb, 8, "None", "_color", "Glass", Default4( 1, 1, 1, 1 ) );
 	CreateInputTexture2D( DeadlockMask, Linear, 8, "None", "_mask", "Glass", Default4( 1, 1, 1, 1 ) );
@@ -126,8 +143,10 @@ PS
 		return float3( dot( r, c ), dot( g, c ), dot( b, c ) );
 	}
 
-	float4 MainPs( PixelInput i ) : SV_Target0
+	// The window's colour; bloomMask is how much of it the bloom amount override takes (the layers' glow).
+	float4 ShadePixel( PixelInput i, out float bloomMask )
 	{
+		bloomMask = 0.0;
 		float2 uv = i.vTextureCoords.xy;
 		float2 uv2 = i.vTextureCoords.zw;
 		float3 positionWs = i.vPositionWithOffsetWs.xyz + g_vHighPrecisionLightingOffsetWs.xyz;
@@ -221,6 +240,7 @@ PS
 		float throughBoth = through1 * through2;
 		albedo = lerp( albedo, g_vEmissiveTint2 * albedo, ( 1.0 - throughBoth ) * saturate( emissive2 ) );
 		float selfIllum = lerp( through1 * emissive2, emissive3, throughBoth );
+		bloomMask = selfIllum;
 		albedo = lerp( albedo, g_vEmissiveTint3 * albedo, throughBoth * saturate( emissive3 ) );
 
 		// Reflections are kept off where the occlusion mask says the glass is dark behind.
@@ -274,6 +294,31 @@ PS
 			s.LightmapUV = i.vLightmapUV;
 
 			return DoAtmospherics( m.WorldPosition, m.ScreenPosition.xy, float4( DeadlockShade( s ), 1 ) );
+		#endif
+	}
+
+	float4 MainPs( PixelInput i ) : SV_Target0
+	{
+		#if S_BLOOM_LAYER
+		{
+			// Drawn again into the bloom layer at a quarter of the screen: only where the scene shows this surface.
+			if ( g_flBloomAmount <= 0.0 )
+				discard;
+
+			float3 position = i.vPositionWithOffsetWs.xyz + g_vHighPrecisionLightingOffsetWs.xyz;
+			float depth = dot( position - g_vCameraPositionWs, g_vCameraDirWs );
+			if ( Depth::GetLinear( i.vPositionSs.xy * 4.0 ) < depth - max( 4.0, depth * 0.01 ) )
+				discard;
+		}
+		#endif
+
+		float bloomMask;
+		float4 result = ShadePixel( i, bloomMask );
+
+		#if S_BLOOM_LAYER
+			return float4( result.rgb * min( g_flBloomAmount * bloomMask, 20.0 ) / BLOOM_LAYER_RANGE, 1.0 );
+		#else
+			return result;
 		#endif
 	}
 }

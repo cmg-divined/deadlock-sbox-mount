@@ -54,6 +54,10 @@ internal sealed partial class MapLoader
 			effect.BloomMode = bloom.GetString( "m_blendMode" ) == "BLOOM_BLEND_SCREEN" ? DeadlockPostProcess.BloomBlend.Screen : DeadlockPostProcess.BloomBlend.Add;
 			effect.BloomStrength = bloom.GetFloat( "m_flBloomStrength" );
 			effect.BloomThreshold = bloom.GetFloat( "m_flBloomThreshold", 1 );
+			effect.BloomThresholdWidth = bloom.GetFloat( "m_flBloomThresholdWidth", 0.999f );
+
+			if ( bloom.GetFloatArray( "m_flBlurWeight" ) is { Length: > 0 } weights )
+				effect.BloomWeights = [.. weights];
 		}
 		else
 		{
