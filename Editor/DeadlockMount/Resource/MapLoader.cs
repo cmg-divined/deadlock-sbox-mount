@@ -75,6 +75,10 @@ internal sealed partial class MapLoader( string mapName ) : SceneLoader<Deadlock
 			var collider = collision.Components.Create<ModelCollider>();
 			collider.Model = model;
 			collider.Static = true;
+
+			// Cosmic veils only block sight: heroes, bullets and abilities pass through them.
+			if ( tags.Contains( "Citadel_Obscured", StringComparer.OrdinalIgnoreCase ) )
+				collider.IsTrigger = true;
 		}
 	}
 

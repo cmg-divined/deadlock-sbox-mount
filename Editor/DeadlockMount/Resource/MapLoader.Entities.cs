@@ -173,7 +173,7 @@ internal sealed partial class MapLoader
 	private void AddEntityModel( MapEntity entity, GameObject gameObject )
 	{
 		var (path, scale) = GetEntityModel( entity );
-		if ( path is null )
+		if ( path is null || IsPreMatchBlocker( entity ) )
 			return;
 
 		if ( LoadModel( path ) is not { } model )
@@ -253,6 +253,14 @@ internal sealed partial class MapLoader
 		collider.Static = true;
 		collider.IsTrigger = trigger;
 	}
+
+	/// <summary>
+	/// The walls that keep heroes in their base until the match starts, which the game removes then. Maps load as
+	/// they are during a match.
+	/// </summary>
+	private static bool IsPreMatchBlocker( MapEntity entity ) =>
+		entity.Classname.Equals( "func_brush", StringComparison.OrdinalIgnoreCase )
+		&& entity.TargetName.EndsWith( "spawn_block_brush", StringComparison.OrdinalIgnoreCase );
 
 	/// <summary>
 	/// rendercolor (sRGB 0-255) and renderamt (0-255 alpha).
@@ -361,7 +369,11 @@ internal sealed partial class MapLoader
 		}
 
 		light.LightColor = color * brightness;
-		light.Shadows = entity.GetInt( "castshadows", 1 ) != 0;
+
+		// A stationary light's shadows are baked: Deadlock's shaders take them from the lightmaps' shadow channels, the
+		// light probes and the precomputed shadow atlas, as the game does. A realtime shadow map would re-render the
+		// world for it every frame (dl_midtown has 27, reaching up to 8000 units) for nothing they read.
+		light.Shadows = entity.GetInt( "castshadows", 1 ) != 0 && !HasBakedShadows( entity );
 
 		ApplyLightSettings( entity, light );
 	}
@@ -370,6 +382,8 @@ internal sealed partial class MapLoader
 	/// Whether the game lights with this entity at runtime: dynamic and stationary lights (stationary ones bake
 	/// only their shadows), not static ones, which only exist in the lightmaps.
 	/// </summary>
+	private static bool HasBakedShadows( MapEntity entity ) => entity.GetInt( "bakedshadowindex", entity.GetInt( "bakelightindex", -1 ) ) >= 0;
+
 	private static bool IsRealtime( MapEntity entity )
 	{
 		var light2 = entity.Classname is "light_omni2" or "light_barn" or "light_rect";

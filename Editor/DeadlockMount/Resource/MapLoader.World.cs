@@ -49,7 +49,8 @@ internal sealed partial class MapLoader
 		var cells = new Dictionary<WorldCell, List<(Mesh Mesh, uint LodMask)>>();
 		var bounds = new Dictionary<WorldCell, BBox>();
 		var failures = new System.Collections.Concurrent.ConcurrentQueue<string>();
-		using var results = new System.Collections.Concurrent.BlockingCollection<List<AggregateChunk>>( Math.Max( 4, Environment.ProcessorCount ) );
+		// A few finished aggregates waiting for upload at most: readers wait rather than pile them up in memory.
+		using var results = new System.Collections.Concurrent.BlockingCollection<List<AggregateChunk>>( 4 );
 
 		var reading = System.Threading.Tasks.Task.Run( () =>
 		{

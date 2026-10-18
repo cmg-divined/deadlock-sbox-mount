@@ -157,7 +157,14 @@ Both projects are MIT licensed.
   right shoulder. Keys: move, Jump, Run (dash), Duck (crouch, slide), Attack1/2 (leave out of combat for a while).
   Changing the hero while playing swaps it in place. All 43 playable heroes' graphs run (Nurse Harrow ships
   without her main graph and isn't offered).
-- `generic` and `cosmic_veil` still fall back to `deadlock_pbr`.
+- Cosmic veils (`cosmic_veil.vfx`) are ported (`deadlock_cosmic_veil.shader`): what's behind them blurred and
+  jittered through animated smoke, grey from the front, hue shifted from behind. Their collision only blocks sight
+  in the game, so it's loaded as a trigger and heroes walk through.
+- Materials are created at runtime, and s&box reads a texture a created material doesn't bind as its error
+  checkerboard, so every texture a material leaves unset gets its shader's default.
+- dl_midtown's `*spawn_block_brush` walls, which keep heroes in base until the match starts, aren't loaded: maps
+  load as they are during a match.
+- `generic` still falls back to `deadlock_pbr`.
 
 ## Known limits
 
@@ -214,6 +221,6 @@ Both projects are MIT licensed.
 ## Next steps
 
 1. Dynamic shadows for barn lights, area light shading, Deadlock's own volumetric fog.
-2. Port `generic`, `cosmic_veil` and the remaining `pbr.vfx` features.
+2. Port `generic` and the remaining `pbr.vfx` features.
 3. Particle lights and model particles, path particle ropes, distance field AO.
 4. Hero bone constraints (twist bones), ziplines, the sprint particle (needs particles on model bones).

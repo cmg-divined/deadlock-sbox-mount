@@ -19,6 +19,8 @@ internal sealed class AggregateChunk
 	public uint LodMask;
 	public List<DeadlockPackedVertex> Vertices = [];
 	public List<int> Indices = [];
+	public int VertexCapacity;
+	public int IndexCapacity;
 	public Vector3 Min = new( float.MaxValue );
 	public Vector3 Max = new( float.MinValue );
 
@@ -48,7 +50,10 @@ internal sealed partial class ModelImporter
 		var drawCalls = mesh.DrawCalls.ToArray();
 		var parts = new MeshPart[drawCalls.Length];
 		var hasLods = aggregate.LodSetups.Length > 0;
+		var placements = new List<(AggregateChunk Chunk, MeshPart Part, WorldAggregateFragment Fragment)>( aggregate.Fragments.Length );
 
+		// First where every fragment goes and how big each chunk gets, so its buffers are allocated once at their
+		// size: grown as they fill, a map this size leaves gigabytes of discarded arrays behind while it loads.
 		for ( var fragmentIndex = 0; fragmentIndex < aggregate.Fragments.Length; fragmentIndex++ )
 		{
 			var fragment = aggregate.Fragments[fragmentIndex];
@@ -83,8 +88,19 @@ internal sealed partial class ModelImporter
 			if ( !chunks.TryGetValue( key, out var chunk ) )
 				chunks[key] = chunk = new AggregateChunk { Cell = cell, Material = part.Material, LodMask = lodMask };
 
-			AppendFragment( chunk, part, fragment );
+			chunk.VertexCapacity += part.Vertices.Length;
+			chunk.IndexCapacity += part.Indices.Length;
+			placements.Add( (chunk, part, fragment) );
 		}
+
+		foreach ( var chunk in chunks.Values )
+		{
+			chunk.Vertices = new List<DeadlockPackedVertex>( chunk.VertexCapacity );
+			chunk.Indices = new List<int>( chunk.IndexCapacity );
+		}
+
+		foreach ( var (chunk, part, fragment) in placements )
+			AppendFragment( chunk, part, fragment );
 
 		return [.. chunks.Values];
 	}
@@ -125,8 +141,6 @@ internal sealed partial class ModelImporter
 		var baseVertex = chunk.Vertices.Count;
 		var tint = fragment.TintColor;
 		var tinted = tint[0] != 255 || tint[1] != 255 || tint[2] != 255;
-		chunk.Vertices.EnsureCapacity( baseVertex + part.Vertices.Length );
-		chunk.Indices.EnsureCapacity( chunk.Indices.Count + part.Indices.Length );
 
 		if ( fragment.Transform is not { } transform )
 		{

@@ -29,6 +29,7 @@ internal sealed class MaterialImporter( DeadlockMount mount, CompiledMaterial so
 	public const string ParallaxShader = "shaders/deadlock_parallax_layered.shader";
 	public const string OverlayShader = "shaders/deadlock_overlay.shader";
 	public const string GlassShader = "shaders/deadlock_glass.shader";
+	public const string VeilShader = "shaders/deadlock_cosmic_veil.shader";
 
 	/// <summary>
 	/// How strongly the luminance preserving tint mode keeps saturation.
@@ -39,7 +40,77 @@ internal sealed class MaterialImporter( DeadlockMount mount, CompiledMaterial so
 	private static readonly float[] Green = [0, 1, 0, 0];
 	private static readonly float[] Alpha = [0, 0, 0, 1];
 
+	/// <summary>
+	/// Every texture of each shader and what it reads when the material has none: the shader's own default. s&amp;box
+	/// only fills those in for compiled materials; a created one reads an unbound texture as the error checkerboard.
+	/// </summary>
+	private static readonly Dictionary<string, (string Texture, bool Srgb, Vector4 Value)[]> DefaultTextures = new()
+	{
+		[Shader] =
+		[
+			("g_tColor", true, new( 1, 1, 1, 1 )),
+			("g_tNormalRoughness", false, new( 0.5f, 0.5f, 1, 1 )),
+			("g_tMetalness", false, new( 0, 0, 0, 0 )),
+			("g_tTintMask", false, new( 1, 1, 1, 1 )),
+			("g_tSelfIllumMask", false, new( 1, 1, 1, 1 )),
+			("g_tAmbientOcclusion", false, new( 1, 1, 1, 1 )),
+			("g_tRimLightMask", false, new( 1, 1, 1, 1 )),
+			("g_tNprTransmissiveColor", true, new( 0, 0, 0, 1 )),
+		],
+		[EnvironmentShader] =
+		[
+			("g_tColor1", true, new( 1, 1, 1, 1 )),
+			("g_tNormalRoughness1", false, new( 0.5f, 0.5f, 1, 1 )),
+			("g_tPacked1", false, new( 0, 0, 0, 0 )),
+			("g_tColor2", true, new( 1, 1, 1, 1 )),
+			("g_tNormalRoughness2", false, new( 0.5f, 0.5f, 1, 1 )),
+			("g_tPacked2", false, new( 0, 0, 0, 0 )),
+			("g_tRevealMask2", false, new( 0.5f, 0.5f, 0.5f, 0.5f )),
+			("g_tColor3", true, new( 1, 1, 1, 1 )),
+			("g_tNormalRoughness3", false, new( 0.5f, 0.5f, 1, 1 )),
+			("g_tPacked3", false, new( 0, 0, 0, 0 )),
+			("g_tRevealMask3", false, new( 0.5f, 0.5f, 0.5f, 0.5f )),
+			("g_tColorOverlay", true, new( 0.5f, 0.5f, 0.5f, 1 )),
+			("g_tNormalRoughnessOverlay", false, new( 0.5f, 0.5f, 0.5f, 1 )),
+			("g_tRevealOverlay", false, new( 0, 0, 0, 0 )),
+			("g_tColorWorldOverlay", true, new( 0.5f, 0.5f, 0.5f, 1 )),
+			("g_tColorWorldOverlay2", true, new( 0.5f, 0.5f, 0.5f, 1 )),
+		],
+		[ParallaxShader] =
+		[
+			("g_tColor", true, new( 1, 1, 1, 1 )),
+			("g_tMask", false, new( 1, 1, 1, 1 )),
+			("g_tNormalRoughness", false, new( 0.5f, 0.5f, 1, 1 )),
+			("g_tColor2", true, new( 0, 0, 0, 0 )),
+			("g_tMask2", false, new( 0, 0, 0, 0 )),
+			("g_tNormalRoughness2", false, new( 0.5f, 0.5f, 1, 1 )),
+			("g_tColor3", true, new( 0, 0, 0, 0 )),
+			("g_tReflectionOcclusionMask", false, new( 0, 0, 0, 0 )),
+		],
+		[OverlayShader] =
+		[
+			("g_tColor", true, new( 1, 1, 1, 0 )),
+			("g_tNormalRoughness", false, new( 0.5f, 0.5f, 1, 1 )),
+			("g_tSelfIllumTintMask", false, new( 0, 1, 0, 0 )),
+		],
+		[GlassShader] =
+		[
+			("g_tColor", true, new( 1, 1, 1, 0 )),
+			("g_tNormalRoughness", false, new( 0.5f, 0.5f, 1, 0 )),
+			("g_tTintMask", false, new( 1, 1, 1, 1 )),
+			("g_tGlass", false, new( 1, 1, 1, 1 )),
+		],
+		[VeilShader] =
+		[
+			("g_tMasks", false, new( 0.5f, 0.5f, 0.5f, 0 )),
+			("g_tWarpMask", false, new( 0.5f, 0.5f, 0.5f, 0 )),
+		],
+	};
+
+	private static readonly Dictionary<uint, Texture> SolidTextures = [];
+
 	private Material _material;
+	private readonly HashSet<string> _boundTextures = [];
 
 	public Material Import()
 	{
@@ -55,6 +126,7 @@ internal sealed class MaterialImporter( DeadlockMount mount, CompiledMaterial so
 			_ when glass => GlassShader,
 			"environment_parallax_layered.vfx" => ParallaxShader,
 			"citadel_overlay.vfx" => OverlayShader,
+			"cosmic_veil.vfx" => VeilShader,
 			_ => Shader,
 		};
 
@@ -79,6 +151,10 @@ internal sealed class MaterialImporter( DeadlockMount mount, CompiledMaterial so
 				SetupOverlay();
 				break;
 
+			case "cosmic_veil.vfx":
+				SetupVeil();
+				break;
+
 			case "pbr.vfx":
 				SetupPbr();
 				break;
@@ -96,7 +172,43 @@ internal sealed class MaterialImporter( DeadlockMount mount, CompiledMaterial so
 		if ( source.StringAttributes.TryGetValue( "PhysicsSurfaceProperties", out var surface ) && mount.GetSurface( surface ) is { } mapped )
 			_material.Attributes.Set( "PhysicsSurfaceProperties", mapped.ResourceName );
 
+		BindDefaultTextures( shader );
+
 		return _material;
+	}
+
+	/// <summary>
+	/// Binds the shader's default to each of its textures the material left unbound.
+	/// </summary>
+	private void BindDefaultTextures( string shader )
+	{
+		if ( !DefaultTextures.TryGetValue( shader, out var textures ) )
+			return;
+
+		foreach ( var (texture, srgb, value) in textures )
+		{
+			if ( !_boundTextures.Contains( texture ) )
+				_material.Set( texture, SolidTexture( value, srgb ) );
+		}
+	}
+
+	/// <summary>
+	/// A 1x1 texture that reads as <paramref name="value"/>, sRGB encoded for a texture read as sRGB.
+	/// </summary>
+	private static Texture SolidTexture( Vector4 value, bool srgb )
+	{
+		byte Channel( float x, bool encode ) => (byte)MathF.Round( Math.Clamp( encode ? ColorMatrices.LinearToSrgb( x ) : x, 0f, 1f ) * 255f );
+
+		var pixel = new[] { Channel( value.x, srgb ), Channel( value.y, srgb ), Channel( value.z, srgb ), Channel( value.w, false ) };
+		var key = BitConverter.ToUInt32( pixel );
+
+		lock ( SolidTextures )
+		{
+			if ( !SolidTextures.TryGetValue( key, out var texture ) || !texture.IsValid() )
+				SolidTextures[key] = texture = Texture.Create( 1, 1 ).WithName( $"deadlock_solid_{key:x8}" ).WithData( pixel ).Finish();
+
+			return texture;
+		}
 	}
 
 	/// <summary>
@@ -367,21 +479,30 @@ internal sealed class MaterialImporter( DeadlockMount mount, CompiledMaterial so
 		for ( var layer = 1; layer <= 3; layer++ )
 			_material.Set( $"g_flVertexColorStrength{layer}", Float( $"g_fVertexColorStrength{layer}", 1f ) );
 
-		_material.Set( "g_vEmissiveTint2", GetVector3( "g_vEmissiveTint2", 1 ) );
+		// The shader takes these as its expressions compute them from the material: emissive tints as
+		// pow( 2, level ) * SrgbGammaToLinear( tint ), layer depths in 1024ths.
+		_material.Set( "g_vEmissiveTint2", EmissiveTint( "g_vEmissiveTint2", "g_flEmissiveLevel2" ) );
 		_material.Set( "g_flEmissiveLevel2", Float( "g_flEmissiveLevel2", 0f ) );
-		_material.Set( "g_vEmissiveTint3", GetVector3( "g_vEmissiveTint3", 1 ) );
+		_material.Set( "g_vEmissiveTint3", EmissiveTint( "g_vEmissiveTint3", "g_flEmissiveLevel3" ) );
 		_material.Set( "g_flEmissiveLevel3", Float( "g_flEmissiveLevel3", 0f ) );
 
-		_material.Set( "g_flLayer2Offset", Float( "g_flLayer2Offset", 0f ) );
-		_material.Set( "g_flParallaxViewAngleLimit2", Float( "g_flParallaxViewAngleLimit2", 1f ) );
+		_material.Set( "g_flLayer2Offset", Float( "g_flLayer2Offset", 0f ) / 1024f );
+		_material.Set( "g_flParallaxViewAngleLimit2", Float( "g_flParallaxViewAngleLimit2", 0.5f ) );
 		SetBool( "g_flLayer2UseSecondaryUv", "g_bLayer2UseSecondaryUV" );
-		_material.Set( "g_flLayer2ShadingBlendStrength", Float( "g_bLayer2ShadingBlendStrength", 0f ) );
-		_material.Set( "g_flLayer3Offset", Float( "g_flLayer3Offset", 0f ) );
-		_material.Set( "g_flParallaxViewAngleLimit3", Float( "g_flParallaxViewAngleLimit3", 1f ) );
+		_material.Set( "g_flLayer2ShadingBlendStrength", Float( "g_bLayer2ShadingBlendStrength", 1f ) );
+		_material.Set( "g_flLayer3Offset", Float( "g_flLayer3Offset", 0f ) / 1024f );
+		_material.Set( "g_flParallaxViewAngleLimit3", Float( "g_flParallaxViewAngleLimit3", 0.5f ) );
 		SetBool( "g_flLayer3UseSecondaryUv", "g_bLayer3UseSecondaryUV" );
-		_material.Set( "g_flReflectionOcclusionOffset", Float( "g_flReflectionOcclusionOffset", 0f ) );
-		_material.Set( "g_flReflectionOcclusionViewAngleLimit", Float( "g_flReflectionOcclusionViewAngleLimit", 1f ) );
+		_material.Set( "g_flReflectionOcclusionOffset", Float( "g_flReflectionOcclusionOffset", 0f ) / 1024f );
+		_material.Set( "g_flReflectionOcclusionViewAngleLimit", Float( "g_flReflectionOcclusionViewAngleLimit", 0.5f ) );
 		SetBool( "g_flReflectionOcclusionUseSecondaryUv", "g_bReflectionOcclusionUseSecondaryUV" );
+	}
+
+	private Vector3 EmissiveTint( string tintParameter, string levelParameter )
+	{
+		var tint = GetVector3( tintParameter, 1 );
+		var scale = MathF.Pow( 2, Float( levelParameter, 0f ) );
+		return new Vector3( ColorMatrices.SrgbToLinear( tint.x ), ColorMatrices.SrgbToLinear( tint.y ), ColorMatrices.SrgbToLinear( tint.z ) ) * scale;
 	}
 
 	/// <summary>
@@ -405,6 +526,32 @@ internal sealed class MaterialImporter( DeadlockMount mount, CompiledMaterial so
 		_material.Set( "g_vSelfIllumTint", GetVector3( "g_vSelfIllumTint", 1 ) );
 		_material.Set( "g_flSelfIllumScale", Float( "g_flSelfIllumScale", 0f ) );
 		_material.Set( "g_flSelfIllumAlbedoFactor", Float( "g_flSelfIllumAlbedoFactor", 1f ) );
+	}
+
+	/// <summary>
+	/// cosmic_veil, the curtains across doorways that hide what's behind them, on deadlock_cosmic_veil.shader. The
+	/// defaults are the game shader's.
+	/// </summary>
+	private void SetupVeil()
+	{
+		BindTexture( "g_tMasks", "g_tMasks" );
+		BindTexture( "g_tWarpMask", "g_tWarpMask" );
+
+		_material.Set( "g_flRevealMax", Float( "g_flRevealMax", 1f ) );
+		_material.Set( "g_vWarpMaskBrightnessAmounts", GetVector2( "g_vWarpMaskBrightnessAmounts", 1, 1 ) );
+		SetBool( "g_flDoubleSidedVeil", "g_bDoubleSidedVeil" );
+		_material.Set( "g_vHueShiftAmounts", GetVector2( "g_vHueShiftAmounts", -0.1f, 0.1f ) );
+		_material.Set( "g_vRefractBlurAmounts", GetVector2( "g_vRefractBlurAmounts", 0.005f, 0.005f ) );
+		_material.Set( "g_vRefractBlurAmountsVeiled", GetVector2( "g_vRefractBlurAmountsVeiled", 0.005f, 0.005f ) );
+		_material.Set( "g_vRefractBrightnessAmounts", GetVector2( "g_vRefractBrightnessAmounts", 1, 0.2f ) );
+		_material.Set( "g_vRefractBrightnessAmountsVeiled", GetVector2( "g_vRefractBrightnessAmountsVeiled", 1, 0.2f ) );
+		_material.Set( "g_vRefractNoiseAmounts", GetVector2( "g_vRefractNoiseAmounts", 0.5f, 0.5f ) );
+		_material.Set( "g_vRefractNoiseAmountsVeiled", GetVector2( "g_vRefractNoiseAmountsVeiled", 0.5f, 0.5f ) );
+		_material.Set( "g_flSmokeRateVariance", Float( "g_flSmokeRateVariance", -0.8f ) );
+		_material.Set( "g_flSmokeSpeed", Float( "g_flSmokeSpeed", 1f ) );
+		_material.Set( "g_flSmokeStepRotation", Float( "g_flSmokeStepRotation", 0.01f ) );
+		_material.Set( "g_flSmokeStepSize", Float( "g_flSmokeStepSize", 0.005f ) );
+		_material.Set( "g_vSmokeSpatialFrequencies", GetVector2( "g_vSmokeSpatialFrequencies", 12, 17 ) );
 	}
 
 	/// <summary>
@@ -559,6 +706,7 @@ internal sealed class MaterialImporter( DeadlockMount mount, CompiledMaterial so
 			return false;
 
 		_material.Set( shaderTexture, texture );
+		_boundTextures.Add( shaderTexture );
 		return true;
 	}
 
