@@ -1,0 +1,64 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Builds the Deadlock mount for s&box's own mount folder (sbox/mount/deadlock), to use it outside this project, e.g. in
+    the Sandbox game: the mount (Editor/DeadlockMount, without its editor UI) and the game code its scenes and models
+    use (Code) in one deadlock.dll, next to the shaders it creates materials with (Assets/shaders). Build with
+    Build/build-mount.cmd; the result is Build/mount/deadlock.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Library</OutputType>
+    <AssemblyName>deadlock</AssemblyName>
+    <RootNamespace>Sandbox</RootNamespace>
+    <LangVersion>14</LangVersion>
+    <Nullable>disable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <DefineConstants>SANDBOX</DefineConstants>
+    <Optimize>true</Optimize>
+    <DebugType>portable</DebugType>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <NoWarn>1701;1702;1591;CS8632;CS0618</NoWarn>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <GenerateDependencyFile>false</GenerateDependencyFile>
+    <OutputPath>..\mount\deadlock\</OutputPath>
+  </PropertyGroup>
+
+  <!-- s&box's assemblies: from FACEPUNCH_ENGINE (which s&box sets), else Steam's default library; or pass -p:SboxPath=... -->
+  <PropertyGroup>
+    <SboxPath Condition="'$(SboxPath)' == ''">$(FACEPUNCH_ENGINE)</SboxPath>
+    <SboxPath Condition="'$(SboxPath)' == ''">C:/Program Files (x86)/Steam/steamapps/common/sbox</SboxPath>
+    <SboxManaged>$(SboxPath)/bin/managed</SboxManaged>
+  </PropertyGroup>
+
+  <Target Name="CheckSbox" BeforeTargets="ResolveAssemblyReferences">
+    <Error Condition="!Exists('$(SboxManaged)/Sandbox.Engine.dll')" Text="Couldn't find s&amp;box in '$(SboxPath)'. Set FACEPUNCH_ENGINE to its folder, or build with -p:SboxPath=&lt;folder&gt;." />
+  </Target>
+
+  <ItemGroup>
+    <Using Include="Sandbox.Internal.GlobalGameNamespace" Static="true" />
+    <Compile Include="..\..\Code\**\*.cs" Exclude="..\..\Code\obj\**;..\..\Code\Properties\**" />
+    <Compile Include="..\..\Editor\DeadlockMount\**\*.cs" Exclude="..\..\Editor\DeadlockMount\DeadlockHeroControlWidget.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Analyzer Include="$(SboxManaged)/Sandbox.Generator.dll" />
+    <Reference Include="$(SboxManaged)/Sandbox.System.dll" Private="false" />
+    <Reference Include="$(SboxManaged)/Sandbox.Engine.dll" Private="false" />
+    <Reference Include="$(SboxManaged)/Sandbox.Filesystem.dll" Private="false" />
+    <Reference Include="$(SboxManaged)/Sandbox.Reflection.dll" Private="false" />
+    <Reference Include="$(SboxManaged)/Sandbox.Mounting.dll" Private="false" />
+    <Reference Include="$(SboxManaged)/Sandbox.Event.dll" Private="false" />
+    <Reference Include="$(SboxManaged)/Microsoft.AspNetCore.Components.dll" Private="false" />
+  </ItemGroup>
+
+  <!-- The shaders, compiled by the editor (their .shader_c), with their sources and includes. -->
+  <Target Name="CopyShaders" AfterTargets="Build">
+    <ItemGroup>
+      <MountShaders Include="..\..\Assets\shaders\deadlock_*.*" />
+    </ItemGroup>
+    <RemoveDir Directories="$(OutputPath)Assets\shaders" />
+    <Copy SourceFiles="@(MountShaders)" DestinationFolder="$(OutputPath)Assets\shaders" />
+    <Copy SourceFiles="..\README.txt" DestinationFolder="$(OutputPath)" />
+  </Target>
+</Project>

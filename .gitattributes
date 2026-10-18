@@ -1,0 +1,3 @@
+# Compiled shaders are binary; never convert their line endings
+*.shader_c binary
+*.cmd text eol=crlf

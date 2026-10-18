@@ -1,0 +1,128 @@
+#nullable enable annotations
+
+using System;
+using System.Numerics;
+
+namespace Deadlock.Animation.ModelAnimation
+{
+    using Vector2 = System.Numerics.Vector2;
+    using Vector3 = System.Numerics.Vector3;
+    using Vector4 = System.Numerics.Vector4;
+    using AnimationGraph = Deadlock.Animation.ModelAnimation2.AnimationGraph;
+
+    /// <summary>
+    /// Represents root motion movement data for an animation.
+    /// </summary>
+    /// <seealso href="https://s2v.app/SchemaExplorer/cs2/animationsystem/CAnimMovement">CAnimMovement</seealso>
+    public class AnimationMovement
+    {
+        /// <summary>
+        /// Represents interpolated movement data containing position and angle.
+        /// </summary>
+        public readonly struct MovementData
+        {
+            /// <summary>
+            /// Gets the position offset.
+            /// </summary>
+            public Vector3 Position { get; }
+
+            /// <summary>
+            /// Gets the angle offset in degrees.
+            /// </summary>
+            public float Angle { get; }
+
+            /// <summary>
+            /// Initializes a new instance of the <see cref="MovementData"/> struct.
+            /// </summary>
+            public MovementData(Vector3 position, float angle)
+            {
+                Position = position;
+                Angle = angle;
+            }
+        }
+
+        /// <summary>
+        /// Gets the ending frame for this movement.
+        /// </summary>
+        public int EndFrame { get; }
+
+        /// <summary>
+        /// Gets the motion flags for this movement.
+        /// </summary>
+        public ModelAnimationMotionFlags MotionFlags { get; }
+
+        /// <summary>
+        /// Gets the first motion scalar value (v0) for this segment.
+        /// </summary>
+        public float V0 { get; }
+
+        /// <summary>
+        /// Gets the second motion scalar value (v1) for this segment.
+        /// </summary>
+        public float V1 { get; }
+
+        /// <summary>
+        /// Gets the rotation angle in degrees.
+        /// </summary>
+        public float Angle { get; }
+
+        /// <summary>
+        /// Gets the motion vector parameter stored for this segment.
+        /// </summary>
+        public Vector3 Vector { get; }
+
+        /// <summary>
+        /// Gets the translation offset parameter stored for this segment.
+        /// </summary>
+        public Vector3 Position { get; }
+
+        /// <summary>
+        /// Gets a value indicating whether every motion parameter of this segment is zero, so it moves nothing.
+        /// </summary>
+        public bool IsZero => V0 == 0f && V1 == 0f && Angle == 0f && Vector == Vector3.Zero && Position == Vector3.Zero;
+
+        /// <summary>
+        /// Initializes a new instance of the <see cref="AnimationMovement"/> class.
+        /// </summary>
+        private static Vector3 ToVector3(float[] values) => values is { Length: >= 3 } ? new Vector3(values[0], values[1], values[2]) : Vector3.Zero;
+
+        public AnimationMovement(KVObject frameBlock)
+        {
+            EndFrame = frameBlock.GetInt32Property("endframe");
+            MotionFlags = (ModelAnimationMotionFlags)frameBlock.GetInt32Property("motionflags");
+            V0 = frameBlock.GetFloatProperty("v0");
+            V1 = frameBlock.GetFloatProperty("v1");
+            Angle = frameBlock.GetFloatProperty("angle");
+            Vector = ToVector3(frameBlock.GetFloatArray("vector"));
+            Position = ToVector3(frameBlock.GetFloatArray("position"));
+        }
+
+        /// <summary>
+        /// Interpolates linearly between two movement states using <paramref name="t"/> in the range [0, 1].
+        /// </summary>
+        public static MovementData Lerp(AnimationMovement? a, AnimationMovement? b, float t)
+        {
+            return (a, b) switch
+            {
+                (null, null) => new(),
+                (null, _) => Lerp(Vector3.Zero, 0, b.Position, b.Angle, t),
+                (_, null) => Lerp(a.Position, a.Angle, Vector3.Zero, 0f, t),
+                _ => Lerp(a.Position, a.Angle, b.Position, b.Angle, t),
+            };
+        }
+
+        /// <summary>
+        /// Interpolates linearly between two movement samples using <paramref name="t"/> in the range [0, 1].
+        /// </summary>
+        public static MovementData Lerp(in MovementData a, in MovementData b, float t)
+            => Lerp(a.Position, a.Angle, b.Position, b.Angle, t);
+
+        private static MovementData Lerp(Vector3 aPos, float aAngle, Vector3 bPos, float bAngle, float t)
+        {
+            var position = Vector3.Lerp(aPos, bPos, t);
+            var angle = float.Lerp(aAngle, bAngle, t);
+
+            return new MovementData(position, angle);
+        }
+    }
+}

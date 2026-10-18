@@ -1,0 +1,90 @@
+using System;
+using System.Numerics;
+using Deadlock.Particles.Utils;
+
+namespace Deadlock.Particles.Operators
+{
+    using Vector2 = System.Numerics.Vector2;
+    using Vector3 = System.Numerics.Vector3;
+    using Vector4 = System.Numerics.Vector4;
+
+    /// <summary>
+    /// Scales a particle's radius by interpolating between a start scale and end scale over a
+    /// specified time window of the particle's normalized lifetime, with an optional bias applied
+    /// to the interpolation curve.
+    /// </summary>
+    /// <remarks>
+    /// "Radius Scale" in the particle editor. Multiple instances can be used in one effect as
+    /// long as their time windows don't overlap.
+    /// </remarks>
+    /// <seealso href="https://s2v.app/SchemaExplorer/cs2/particles/C_OP_InterpolateRadius">C_OP_InterpolateRadius</seealso>
+    class InterpolateRadius : ParticleFunctionOperator
+    {
+        private readonly float startTime;
+        private readonly float endTime = 1;
+        private readonly INumberProvider startScale = new LiteralNumberProvider(1);
+        private readonly INumberProvider endScale = new LiteralNumberProvider(1);
+        private readonly bool easeInAndOut;
+
+        /// <summary>The bias curve's parameter. 0.5 is the identity, and an authored 0 means 0.5.</summary>
+        private readonly float bias = 0.5f;
+
+        public InterpolateRadius(ParticleDefinitionParser parse) : base(parse)
+        {
+            startTime = parse.Float("m_flStartTime", startTime);
+            endTime = parse.Float("m_flEndTime", endTime);
+            startScale = parse.NumberProvider("m_flStartScale", startScale);
+            endScale = parse.NumberProvider("m_flEndScale", endScale);
+            easeInAndOut = parse.Boolean("m_bEaseInAndOut", easeInAndOut);
+
+            var authoredBias = parse.Float("m_flBias", bias);
+            bias = authoredBias == 0f ? 0.5f : authoredBias;
+        }
+
+        public override void Operate(ParticleCollection particles, float frameTime, ParticleSystemState particleSystemState, float strength)
+        {
+            if (endTime <= startTime)
+            {
+                return;
+            }
+
+            foreach (ref var particle in particles.Current)
+            {
+                if (particle.Lifetime <= 0f)
+                {
+                    continue;
+                }
+
+                var time = particle.NormalizedAge;
+                var frameFraction = frameTime / particle.Lifetime;
+
+                // A window shorter than a frame would otherwise fall between two updates and never
+                // be entered, so the window's far end carries a frame's worth of slack
+                var windowEnd = particle.Lifetime * (endTime - startTime) <= frameTime
+                    ? startTime + frameFraction
+                    : endTime;
+
+                if (time >= startTime && time <= frameFraction + windowEnd)
+                {
+                    var startScale = this.startScale.NextNumber(ref particle, particleSystemState);
+                    var endScale = this.endScale.NextNumber(ref particle, particleSystemState);
+
+                    var timeScale = MathUtils.Remap(time, startTime, endTime);
+
+                    if (easeInAndOut)
+                    {
+                        timeScale = timeScale * timeScale * (3 - 2 * timeScale); // smoothstep
+                    }
+                    else if (bias != 0.5f)
+                    {
+                        timeScale = ParticleMath.Bias(timeScale, bias);
+                    }
+
+                    var radiusScale = MathUtils.Clamp(float.Lerp(startScale, endScale, timeScale), startScale, endScale);
+
+                    particle.Radius = particle.GetInitialScalar(particles, ParticleField.Radius) * radiusScale;
+                }
+            }
+        }
+    }
+}

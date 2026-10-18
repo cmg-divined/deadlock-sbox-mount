@@ -1,0 +1,32 @@
+using System;
+using System.Numerics;
+namespace Deadlock.Animation.ModelAnimation
+{
+    using Vector2 = System.Numerics.Vector2;
+    using Vector3 = System.Numerics.Vector3;
+    using Vector4 = System.Numerics.Vector4;
+    using AnimationGraph = Deadlock.Animation.ModelAnimation2.AnimationGraph;
+
+    /// <summary>
+    /// Flags describing how root motion is applied from an animation segment.
+    /// </summary>
+    /// <seealso href="https://s2v.app/SchemaExplorer/cs2/animationsystem/CAnimMovement">CAnimMovement</seealso>
+    [Flags]
+    public enum ModelAnimationMotionFlags
+    {
+        /// <summary>Root motion is applied along the X axis (translate X).</summary>
+        TX = 64,
+
+        /// <summary>Root motion is applied along the Y axis (translate Y).</summary>
+        TY = 128,
+
+        /// <summary>Root motion is applied along the Z axis (translate Z).</summary>
+        TZ = 256,
+
+        /// <summary>Root motion is applied as a rotation around the Z axis (rotate Z / yaw).</summary>
+        RZ = 2048,
+
+        /// <summary>Root motion uses linear (constant-velocity) interpolation instead of curve-based.</summary>
+        Linear = 4096,
+    }
+}

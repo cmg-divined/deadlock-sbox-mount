@@ -1,0 +1,94 @@
+#nullable enable annotations
+
+using System;
+using System.Numerics;
+
+namespace Deadlock.Particles.Operators
+{
+    using Vector2 = System.Numerics.Vector2;
+    using Vector3 = System.Numerics.Vector3;
+    using Vector4 = System.Numerics.Vector4;
+
+    /// <summary>
+    /// Evaluates a scalar expression (add, subtract, multiply, divide, min, max, mod, input passthrough,
+    /// or comparisons such as equal/greater-than/less-than) on two per-particle float inputs and writes
+    /// the result, mapped through the output remap, to a scalar particle attribute.
+    /// </summary>
+    /// <seealso href="https://s2v.app/SchemaExplorer/cs2/particles/C_OP_SetAttributeToScalarExpression">C_OP_SetAttributeToScalarExpression</seealso>
+    class SetAttributeToScalarExpression : ParticleFunctionOperator
+    {
+        private readonly ParticleField outputField = ParticleField.Radius;
+        private readonly INumberProvider input1 = new LiteralNumberProvider(1f);
+        private readonly INumberProvider input2 = new LiteralNumberProvider(0);
+        private readonly ScalarExpressionType expression = ScalarExpressionType.SCALAR_EXPRESSION_ADD;
+        private readonly ParticleSetMethod setMethod = ParticleSetMethod.PARTICLE_SET_REPLACE_VALUE;
+        private readonly AttributeMapping? outputRemap;
+
+        public SetAttributeToScalarExpression(ParticleDefinitionParser parse) : base(parse)
+        {
+            outputField = parse.ParticleField("m_nOutputField", outputField);
+            input1 = parse.NumberProvider("m_flInput1", input1);
+            input2 = parse.NumberProvider("m_flInput2", input2);
+            expression = parse.Enum<ScalarExpressionType>("m_nExpression", expression);
+            setMethod = parse.Enum<ParticleSetMethod>("m_nSetMethod", setMethod);
+
+            if (parse.Data.GetSubCollection("m_flOutputRemap") is { IsCollection: true } remap)
+            {
+                outputRemap = new AttributeMapping(parse.Nested(remap));
+            }
+        }
+
+        public override void Operate(ParticleCollection particles, float frameTime, ParticleSystemState particleSystemState, float strength)
+        {
+            foreach (ref var particle in particles.Current)
+            {
+                var value1 = input1.NextNumber(ref particle, particleSystemState);
+                var value2 = input2.NextNumber(ref particle, particleSystemState);
+
+                var output = expression switch
+                {
+                    ScalarExpressionType.SCALAR_EXPRESSION_UNINITIALIZED
+                        => 0f,
+                    ScalarExpressionType.SCALAR_EXPRESSION_ADD
+                        => value1 + value2,
+                    ScalarExpressionType.SCALAR_EXPRESSION_SUBTRACT
+                        => value1 - value2,
+                    ScalarExpressionType.SCALAR_EXPRESSION_MUL
+                        => value1 * value2,
+                    ScalarExpressionType.SCALAR_EXPRESSION_DIVIDE
+                        => value2 == 0f ? 0f : value1 / value2,
+                    ScalarExpressionType.SCALAR_EXPRESSION_INPUT_1
+                        => value1,
+                    ScalarExpressionType.SCALAR_EXPRESSION_MIN
+                        => Math.Min(value1, value2),
+                    ScalarExpressionType.SCALAR_EXPRESSION_MAX
+                        => Math.Max(value1, value2),
+                    ScalarExpressionType.SCALAR_EXPRESSION_MOD // new in CS2
+                        => (float)(value1 % value2),
+                    ScalarExpressionType.SCALAR_EXPRESSION_EQUAL
+                        => value1 == value2 ? 1f : 0f,
+                    ScalarExpressionType.SCALAR_EXPRESSION_GT
+                        => value1 > value2 ? 1f : 0f,
+                    ScalarExpressionType.SCALAR_EXPRESSION_LT
+                        => value1 < value2 ? 1f : 0f,
+                    _ => throw new NotImplementedException($"Unrecognized scalar expression type ({expression})")
+                };
+
+                // Strength scales arithmetic results before the set method; comparisons stay 0/1
+                if (expression is not (ScalarExpressionType.SCALAR_EXPRESSION_EQUAL
+                    or ScalarExpressionType.SCALAR_EXPRESSION_GT
+                    or ScalarExpressionType.SCALAR_EXPRESSION_LT))
+                {
+                    output *= strength;
+                }
+
+                if (outputRemap != null)
+                {
+                    output = outputRemap.ApplyMapping(output);
+                }
+
+                particle.SetScalar(outputField, particle.ModifyScalarBySetMethod(particles, outputField, output, setMethod));
+            }
+        }
+    }
+}

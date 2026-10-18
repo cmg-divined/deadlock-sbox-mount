@@ -1,0 +1,34 @@
+using System;
+using System.Numerics;
+namespace Deadlock.Animation.ModelAnimation
+{
+    using Vector2 = System.Numerics.Vector2;
+    using Vector3 = System.Numerics.Vector3;
+    using Vector4 = System.Numerics.Vector4;
+    using AnimationGraph = Deadlock.Animation.ModelAnimation2.AnimationGraph;
+
+    /// <summary>
+    /// An event on an animation timeline, sampled by the player as it advances a clip. Implemented by
+    /// <see cref="AnimationEvent"/> for sequences and by <see cref="Animation.Event"/> for
+    /// animation graph clips, which author their event times in different units but both carry a cycle.
+    /// </summary>
+    public interface IAnimationEvent
+    {
+        /// <summary>
+        /// Gets the position of the event as a fraction of the animation, zero being its start and one its end.
+        /// This is what playback is sampled against, so the two formats compare in the same space.
+        /// </summary>
+        float StartCycle { get; }
+
+        /// <summary>
+        /// Gets the time in seconds from the start of the animation at which the event fires.
+        /// Zero for events that are not authored in seconds, see the implementation.
+        /// </summary>
+        float StartTime { get; }
+
+        /// <summary>
+        /// Gets the duration in seconds of the event window. Zero for events that fire at a single point in time.
+        /// </summary>
+        float Duration { get; }
+    }
+}

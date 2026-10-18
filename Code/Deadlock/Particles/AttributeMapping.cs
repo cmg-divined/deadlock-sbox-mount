@@ -1,0 +1,247 @@
+#nullable enable annotations
+
+using System;
+using System.Numerics;
+using Deadlock.Particles.Utils;
+
+namespace Deadlock.Particles
+{
+    using Vector2 = System.Numerics.Vector2;
+    using Vector3 = System.Numerics.Vector3;
+    using Vector4 = System.Numerics.Vector4;
+
+    /// <summary>
+    /// Particle attribute remapping handler.
+    /// </summary>
+    /// <seealso href="https://s2v.app/SchemaExplorer/cs2/particleslib/CParticleFloatInput">CParticleFloatInput</seealso>
+    class AttributeMapping
+    {
+        /// <summary>
+        /// Input handling modes for attribute mapping operations.
+        /// </summary>
+        /// <seealso href="https://s2v.app/SchemaExplorer/cs2/particleslib/ParticleFloatInputMode_t">ParticleFloatInputMode_t</seealso>
+        internal enum PfInputMode
+        {
+            /// <summary>Invalid input mode.</summary>
+            Invalid = -1,
+            /// <summary>Input values are clamped to the defined input range.</summary>
+            Clamped,
+            /// <summary>Input values wrap around within the defined input range.</summary>
+            Looped,
+        }
+
+        /// <summary>
+        /// Attribute mapping transformation types.
+        /// </summary>
+        /// <seealso href="https://s2v.app/SchemaExplorer/cs2/particleslib/ParticleFloatMapType_t">ParticleFloatMapType_t</seealso>
+        internal enum PfMapType
+        {
+            /// <summary>Invalid mapping type.</summary>
+            Invalid = -1,
+            /// <summary>Passes the input value through unchanged.</summary>
+            Direct,
+            /// <summary>Multiplies the input value by a constant factor.</summary>
+            Mult,
+            /// <summary>Remaps the input from one range to another.</summary>
+            Remap,
+            /// <summary>Remaps the input with an additional bias curve applied.</summary>
+            RemapBiased,
+            /// <summary>Evaluates a piecewise curve at the input value.</summary>
+            Curve,
+            /// <summary>Returns one of two output values depending on whether the input is within a range.</summary>
+            Notched,
+            /// <summary>Rounds the input value using the configured rounding mode.</summary>
+            Round,
+            /// <summary>Takes the smaller of the input value and the compare value.</summary>
+            Min,
+            /// <summary>Takes the larger of the input value and the compare value.</summary>
+            Max,
+            /// <summary>Takes the remainder of the input value divided by the compare value, or the input itself when that is 0.</summary>
+            Mod,
+        };
+
+        /// <summary>
+        /// Rounding modes for <see cref="PfMapType.Round"/>.
+        /// </summary>
+        /// <seealso href="https://s2v.app/SchemaExplorer/cs2/particleslib/ParticleFloatRoundType_t">ParticleFloatRoundType_t</seealso>
+        internal enum PfRoundType
+        {
+            /// <summary>Invalid rounding mode.</summary>
+            Invalid = -1,
+            /// <summary>Round to the nearest integer.</summary>
+            Nearest,
+            /// <summary>Round down.</summary>
+            Floor,
+            /// <summary>Round up.</summary>
+            Ceil,
+        }
+
+        private readonly PfMapType mapType;
+        private readonly PfInputMode inputMode = PfInputMode.Clamped;
+        private readonly PfRoundType roundType = PfRoundType.Nearest;
+
+        private readonly float multFactor;
+
+        private readonly float input0;
+        private readonly float input1;
+        private readonly float output0;
+        private readonly float output1;
+
+        private readonly float notchedRangeMin;
+        private readonly float notchedRangeMax;
+        private readonly float notchedOutputOutside;
+        private readonly float notchedOutputInside;
+
+        private readonly ParticleFloatBiasType biasType;
+        private readonly float biasParameter;
+
+        private readonly PiecewiseCurve? curve;
+
+        private readonly float compareValue;
+
+        public AttributeMapping(ParticleDefinitionParser parse)
+        {
+            mapType = parse.EnumNormalized<PfMapType>("m_nMapType");
+            inputMode = parse.EnumNormalized<PfInputMode>("m_nInputMode", inputMode);
+
+            switch (mapType)
+            {
+                case PfMapType.Direct:
+                    break;
+
+                case PfMapType.Mult:
+                    multFactor = parse.Float("m_flMultFactor");
+                    break;
+
+                case PfMapType.Remap:
+                    input0 = parse.Float("m_flInput0");
+                    input1 = parse.Float("m_flInput1");
+                    output0 = parse.Float("m_flOutput0");
+                    output1 = parse.Float("m_flOutput1");
+
+                    // Sort the input range, swapping the outputs with it so the authored
+                    // input->output pairing (which may deliberately descend) is preserved
+                    if (input0 > input1)
+                    {
+                        (input0, input1) = (input1, input0);
+                        (output0, output1) = (output1, output0);
+                    }
+
+                    break;
+
+                case PfMapType.RemapBiased:
+                    input0 = parse.Float("m_flInput0");
+                    input1 = parse.Float("m_flInput1");
+                    output0 = parse.Float("m_flOutput0");
+                    output1 = parse.Float("m_flOutput1");
+                    biasType = parse.Enum<ParticleFloatBiasType>("m_nBiasType");
+                    biasParameter = parse.Float("m_flBiasParameter");
+                    break;
+
+                case PfMapType.Curve:
+                    var curveData = parse.Data.GetSubCollection("m_Curve");
+                    curve = new PiecewiseCurve(curveData, inputMode == PfInputMode.Looped);
+                    break;
+
+                case PfMapType.Notched:
+                    notchedRangeMin = parse.Float("m_flNotchedRangeMin");
+                    notchedRangeMax = parse.Float("m_flNotchedRangeMax");
+                    notchedOutputOutside = parse.Float("m_flNotchedOutputOutside");
+                    notchedOutputInside = parse.Float("m_flNotchedOutputInside");
+                    break;
+
+                case PfMapType.Round:
+                    roundType = parse.EnumNormalized<PfRoundType>("m_nRoundType", roundType);
+                    break;
+
+                case PfMapType.Min:
+                case PfMapType.Max:
+                case PfMapType.Mod:
+                    compareValue = parse.Float("m_flCompareValue");
+                    break;
+
+                default:
+                    break;
+
+            }
+        }
+
+        public float ApplyMapping(float value)
+        {
+            switch (mapType)
+            {
+                case PfMapType.Mult:
+                    return value * multFactor;
+
+                case PfMapType.Remap:
+                    var valueIn = WrapInput(value);
+
+                    if (input0 == input1)
+                    {
+                        return valueIn >= input1 ? output1 : output0;
+                    }
+
+                    return ClampToOutputRange(
+                        MathUtils.RemapRange(valueIn, input0, input1, output0, output1));
+
+                case PfMapType.RemapBiased:
+                    var remappedTo0_1RangeBiased = MathUtils.Remap(WrapInput(value), input0, input1);
+
+                    // The lower end of the input range is never clamped; the output range is what bounds
+                    // the result, and the bias curve is free to run past either end on the way there
+                    remappedTo0_1RangeBiased = MathF.Min(remappedTo0_1RangeBiased, 1f);
+
+                    var biased = ParticleMath.BiasFromParameter(remappedTo0_1RangeBiased, biasParameter, biasType);
+
+                    return ClampToOutputRange(float.Lerp(output0, output1, biased));
+
+                case PfMapType.Curve:
+                    return curve!.Evaluate(value);
+
+                case PfMapType.Notched:
+                    return value >= notchedRangeMin && value <= notchedRangeMax
+                        ? notchedOutputInside
+                        : notchedOutputOutside;
+
+                case PfMapType.Round:
+                    return roundType switch
+                    {
+                        PfRoundType.Floor => MathF.Floor(value),
+                        PfRoundType.Ceil => MathF.Ceiling(value),
+                        _ => MathF.Round(value),
+                    };
+
+                case PfMapType.Min:
+                    return MathF.Min(value, compareValue);
+
+                case PfMapType.Max:
+                    return MathF.Max(value, compareValue);
+
+                case PfMapType.Mod:
+                    // Truncated remainder, keeping the sign of the input
+                    return compareValue == 0f ? value : value % compareValue;
+
+                default:
+                    return value;
+            }
+        }
+
+        /// <summary>
+        /// Folds the input back into <c>[0, m_flInput1)</c> when the input mode is looped. The period is
+        /// the range's upper end alone, so a range that does not start at zero still wraps at
+        /// <see cref="input1"/>, and a negative input wraps forward rather than keeping its sign.
+        /// </summary>
+        private float WrapInput(float value)
+        {
+            if (inputMode != PfInputMode.Looped || input1 == 0f)
+            {
+                return value;
+            }
+
+            return input1 * MathUtils.Fract(value / input1);
+        }
+
+        private float ClampToOutputRange(float value)
+            => MathUtils.Clamp(value, output0, output1);
+    }
+}

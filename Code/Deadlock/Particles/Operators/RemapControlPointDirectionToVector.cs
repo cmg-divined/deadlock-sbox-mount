@@ -1,0 +1,37 @@
+using System;
+using System.Numerics;
+namespace Deadlock.Particles.Operators
+{
+    using Vector2 = System.Numerics.Vector2;
+    using Vector3 = System.Numerics.Vector3;
+    using Vector4 = System.Numerics.Vector4;
+
+    /// <summary>
+    /// Writes the orientation direction of a control point, scaled by a factor, into a vector
+    /// particle attribute.
+    /// </summary>
+    /// <seealso href="https://s2v.app/SchemaExplorer/cs2/particles/C_OP_RemapControlPointDirectionToVector">C_OP_RemapControlPointDirectionToVector</seealso>
+    class RemapControlPointDirectionToVector : ParticleFunctionOperator
+    {
+        private readonly ParticleField fieldOutput = ParticleField.Position;
+        private readonly int cp;
+        private readonly float scale = 1f;
+
+        public RemapControlPointDirectionToVector(ParticleDefinitionParser parse) : base(parse)
+        {
+            fieldOutput = parse.ParticleField("m_nFieldOutput", fieldOutput);
+            scale = parse.Float("m_flScale", scale);
+            cp = parse.Int32("m_nControlPointNumber", cp);
+        }
+
+        public override void Operate(ParticleCollection particles, float frameTime, ParticleSystemState particleSystemState, float strength)
+        {
+            foreach (ref var particle in particles.Current)
+            {
+                // direction or orientation??
+                var direction = particleSystemState.GetControlPoint(cp).Orientation;
+                particle.SetVector(fieldOutput, direction * scale);
+            }
+        }
+    }
+}
