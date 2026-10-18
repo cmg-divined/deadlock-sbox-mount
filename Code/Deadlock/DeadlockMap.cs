@@ -13,13 +13,13 @@ namespace Deadlock;
 /// it in the editor. This component is how a scene of your own gets the map.
 /// </remarks>
 [Title( "Deadlock Map" ), Category( "Deadlock" ), Icon( "map" )]
-public sealed class DeadlockMap : Component, Component.ExecuteInEditor
+public class DeadlockMap : Component, Component.ExecuteInEditor
 {
 	/// <summary>
 	/// The map's name, as in game/citadel/maps: dl_midtown, dl_hideout, new_player_basics...
 	/// </summary>
 	[Property]
-	public string MapName { get; set; } = "dl_hideout";
+	public string MapName { get; set; } = "dl_midtown";
 
 	/// <summary>
 	/// The hero the player spawns as when the game starts, at one of the map's spawn points, unless the scene has a
@@ -34,6 +34,7 @@ public sealed class DeadlockMap : Component, Component.ExecuteInEditor
 	public string ScenePath => $"mount://deadlock/maps/{MapName}.scene";
 
 	private string _loadedMap;
+	private string _missingMap;
 
 	protected override Task OnLoad( LoadingContext context )
 	{
@@ -56,10 +57,10 @@ public sealed class DeadlockMap : Component, Component.ExecuteInEditor
 
 	protected override void OnUpdate()
 	{
-		// Loads the map once the component is enabled, and again when its name changes in the inspector. Not in
-		// OnEnabled: adding the component in the editor enables it inside its own creation, and building the map's
-		// objects there left their renderers half set up and crashed s&box.
-		if ( _loadedMap != MapName )
+		// Loads the map once the component is enabled, and again when its name changes in the inspector to another
+		// map. Not in OnEnabled: adding the component in the editor enables it inside its own creation, and building
+		// the map's objects there left their renderers half set up and crashed s&box.
+		if ( _loadedMap != MapName && _missingMap != MapName )
 			LoadMap();
 	}
 
@@ -69,22 +70,28 @@ public sealed class DeadlockMap : Component, Component.ExecuteInEditor
 
 	public void LoadMap()
 	{
+		if ( string.IsNullOrWhiteSpace( MapName ) )
+		{
+			UnloadMap();
+			_loadedMap = MapName;
+			return;
+		}
+
+		// A name that isn't a map (one being typed in the inspector, a letter at a time) keeps the map that's loaded.
+		var sceneFile = SceneFile.Load( ScenePath );
+		if ( sceneFile?.GameObjects is null )
+		{
+			_missingMap = MapName;
+			Log.Warning( $"{GameObject.Name}: couldn't load the Deadlock map '{MapName}' ({ScenePath}). Is the Deadlock mount enabled?" );
+			return;
+		}
+
 		UnloadMap();
 		_loadedMap = MapName;
-
-		if ( string.IsNullOrWhiteSpace( MapName ) )
-			return;
 
 		// The map's colliders would join that body and the whole map would move with it.
 		if ( Components.GetInAncestorsOrSelf<Rigidbody>() is { } rigidbody )
 			Log.Warning( $"{GameObject.Name}: Deadlock Map is under '{rigidbody.GameObject.Name}', which has a Rigidbody, so the map will move with it. Put it on an empty GameObject." );
-
-		var sceneFile = SceneFile.Load( ScenePath );
-		if ( sceneFile?.GameObjects is null )
-		{
-			Log.Warning( $"{GameObject.Name}: couldn't load the Deadlock map '{MapName}' ({ScenePath}). Is the Deadlock mount enabled?" );
-			return;
-		}
 
 		foreach ( var json in sceneFile.GameObjects )
 		{
