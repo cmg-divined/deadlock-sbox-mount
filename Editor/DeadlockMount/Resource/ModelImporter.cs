@@ -1,6 +1,7 @@
 using Deadlock;
 using System;
 using System.Numerics;
+using System.Reflection;
 
 namespace Sandbox.Mounting.Deadlock;
 
@@ -57,6 +58,7 @@ internal sealed partial class ModelImporter( DeadlockMount mount, CompiledModel 
 	{
 		var builder = Model.Builder.WithName( name );
 		ReadBodyGroups();
+		ReadClothAnchors();
 
 		var parts = ReadParts();
 		var skeleton = BuildSkeleton( parts );
@@ -76,36 +78,13 @@ internal sealed partial class ModelImporter( DeadlockMount mount, CompiledModel 
 		foreach ( var part in parts )
 		{
 			var lodMask = part.LodMask == AllLods ? AllLods : part.LodMask >> lowestLod;
-			var mesh = CreateMesh( part, skeleton );
 			var inEveryLod = (lodMask & ((1 << lodCount) - 1)) == (1 << lodCount) - 1;
 
-			if ( part.Choices is null )
-			{
-				if ( inEveryLod )
-				{
-					builder.AddMesh( mesh );
-				}
-				else
-				{
-					for ( var lod = 0; lod < MaxLods; lod++ )
-					{
-						if ( (lodMask & (1 << lod)) != 0 )
-							builder.AddMesh( mesh, lod );
-					}
-				}
-			}
-			else
-			{
-				// A body group mesh goes in once per choice and LOD it shows in.
-				foreach ( var (group, choice) in part.Choices )
-				{
-					for ( var lod = 0; lod < MaxLods; lod++ )
-					{
-						if ( inEveryLod ? lod < lodCount : (lodMask & (1 << lod)) != 0 )
-							builder.AddMesh( mesh, lod, group, choice );
-					}
-				}
-			}
+			// A mesh in every LOD goes in all of them (a body group mesh in each of the model's).
+			if ( inEveryLod )
+				lodMask = part.Choices is null ? AllLods : (1 << lodCount) - 1;
+
+			AddPartMesh( builder, part, skeleton, lodMask & AllLods );
 
 			if ( (lodMask & 1) != 0 && part.IsDefault )
 			{
@@ -138,6 +117,59 @@ internal sealed partial class ModelImporter( DeadlockMount mount, CompiledModel 
 			builder.WithData( new DeadlockAnimGraphs { Graphs = graphs } );
 
 		return builder.Create();
+	}
+
+	private static readonly MethodInfo AddMeshToMasks = typeof( ModelBuilder ).GetMethod( "AddMesh", BindingFlags.Instance | BindingFlags.NonPublic, [typeof( Mesh ), typeof( int ), typeof( ulong )] );
+	private static readonly MethodInfo EnsureGroupChoice = typeof( ModelBuilder ).GetMethod( "EnsureGroupChoice", BindingFlags.Instance | BindingFlags.NonPublic, [typeof( string ), typeof( int )] );
+
+	/// <summary>
+	/// Adds a part's mesh to the LODs in <paramref name="lodMask"/> and, for a body group mesh, to its choices, as one
+	/// entry: s&amp;box converts a skinned mesh's bone indices each time the mesh is added, so one added per LOD or
+	/// choice ends up with them divided by the number of adds (Celeste and Geist, whose bodies are in two choices of a
+	/// body group, animated on the wrong bones). The builder's own add to a mask of LODs and choices isn't public;
+	/// without it, each skinned add gets a mesh of its own.
+	/// </summary>
+	private void AddPartMesh( ModelBuilder builder, MeshPart part, BoneLayout skeleton, int lodMask )
+	{
+		var mesh = CreateMesh( part, skeleton );
+
+		if ( AddMeshToMasks is not null && EnsureGroupChoice is not null )
+		{
+			var choiceMask = ulong.MaxValue;
+			if ( part.Choices is not null )
+			{
+				choiceMask = 0;
+				foreach ( var (group, choice) in part.Choices )
+					choiceMask |= 1UL << (int)EnsureGroupChoice.Invoke( builder, [group, choice] );
+			}
+
+			AddMeshToMasks.Invoke( builder, [mesh, lodMask, choiceMask] );
+			return;
+		}
+
+		if ( part.Choices is null && lodMask == AllLods )
+		{
+			builder.AddMesh( mesh );
+			return;
+		}
+
+		var first = true;
+		foreach ( var (group, choice) in part.Choices ?? [(null, 0)] )
+		{
+			for ( var lod = 0; lod < MaxLods; lod++ )
+			{
+				if ( (lodMask & (1 << lod)) == 0 )
+					continue;
+
+				var target = first || part.Bones is null ? mesh : CreateMesh( part, skeleton );
+				first = false;
+
+				if ( group is null )
+					builder.AddMesh( target, lod );
+				else
+					builder.AddMesh( target, lod, group, choice );
+			}
+		}
 	}
 
 	/// <summary>
@@ -400,14 +432,14 @@ internal sealed partial class ModelImporter( DeadlockMount mount, CompiledModel 
 
 		Span<int> indices = stackalloc int[8];
 		Span<float> sourceWeights = stackalloc float[8];
-		Span<int> merged = stackalloc int[8];
-		Span<float> mergedWeights = stackalloc float[8];
+		Span<int> merged = stackalloc int[8 * MaxClothAnchors];
+		Span<float> mergedWeights = stackalloc float[8 * MaxClothAnchors];
 
 		for ( var i = 0; i < vertexCount; i++ )
 		{
 			var count = VertexDecoding.ReadBlend( buffer, blendIndices, blendWeights, boneWeightCount, offset + i, indices, sourceWeights );
 
-			// Map to skeleton bones, merging influences that land on the same bone.
+			// Map to skeleton bones (a cloth bone's to its anchors), merging influences that land on the same bone.
 			var mergedCount = 0;
 			for ( var j = 0; j < count; j++ )
 			{
@@ -419,16 +451,14 @@ internal sealed partial class ModelImporter( DeadlockMount mount, CompiledModel 
 				if ( bone < 0 || bone >= model.Bones.Length )
 					bone = 0;
 
-				var existing = merged[..mergedCount].IndexOf( bone );
-				if ( existing >= 0 )
+				if ( _clothAnchors?[bone] is { } anchors )
 				{
-					mergedWeights[existing] += sourceWeights[j];
+					foreach ( var (anchor, share) in anchors )
+						AddInfluence( merged, mergedWeights, ref mergedCount, anchor, sourceWeights[j] * share );
 				}
 				else
 				{
-					merged[mergedCount] = bone;
-					mergedWeights[mergedCount] = sourceWeights[j];
-					mergedCount++;
+					AddInfluence( merged, mergedWeights, ref mergedCount, bone, sourceWeights[j] );
 				}
 			}
 
@@ -461,6 +491,20 @@ internal sealed partial class ModelImporter( DeadlockMount mount, CompiledModel 
 
 		part.Bones = bones;
 		part.Weights = weights;
+	}
+
+	private static void AddInfluence( Span<int> bones, Span<float> weights, ref int count, int bone, float weight )
+	{
+		var existing = bones[..count].IndexOf( bone );
+		if ( existing >= 0 )
+		{
+			weights[existing] += weight;
+			return;
+		}
+
+		bones[count] = bone;
+		weights[count] = weight;
+		count++;
 	}
 
 	/// <summary>

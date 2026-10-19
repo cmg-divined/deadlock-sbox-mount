@@ -234,6 +234,14 @@ internal sealed class CompiledModel
 		return Resource.ReadKeyValues( "PHYS" ) is { } physics ? new CompiledPhysics( physics ) : null;
 	}
 
+	/// <summary>
+	/// The model's cloth (in the PHYS block), or null if it has none.
+	/// </summary>
+	public CompiledCloth ReadCloth()
+	{
+		return Resource.ReadKeyValues( "PHYS" )?.GetObject( "m_pFeModel" ) is { } cloth ? new CompiledCloth( cloth ) : null;
+	}
+
 	public ModelAttachment[] ReadAttachments() => ModelMarkup.ReadAttachments( Meshes.Select( x => x.Data ) );
 
 	public ModelHitboxSet[] ReadHitboxSets() => ModelMarkup.ReadHitboxSets( Meshes.Select( x => x.Data ) );

@@ -25,7 +25,7 @@ editor. `DeadlockMount.cs` and `Resource/` turn it into s&box resources. Shaders
 | `Formats/KeyValues` | Binary KeyValues3 (v1 to v5; uncompressed, LZ4, Zstd). |
 | `Formats/Compression` | Managed LZ4, Zstd and meshoptimizer vertex/index decoders. |
 | `Formats/Mesh` | MBUF/VBIB and MVTX/MIDX buffers, attribute and packed normal/blend decoding. |
-| `Formats/Model` | `vmdl_c` data: skeleton, LOD and mesh group masks, bone remap tables, embedded meshes, morph sets, physics (PHYS), attachments and hitboxes. |
+| `Formats/Model` | `vmdl_c` data: skeleton, LOD and mesh group masks, bone remap tables, embedded meshes, morph sets, physics and cloth (PHYS), attachments and hitboxes. |
 | `Formats/Texture` | `vtex_c` header and per-mip LZ4/Zstd decompression. |
 | `Formats/World` | `vwrld_c` worlds, `vwnod_c` world nodes (scene objects, aggregates and their fragments) and `vents_c` entity lumps. |
 | `Formats/Material` | `vmat_c` parameters, and the albedo colour correction and tint matrices. |
@@ -45,7 +45,11 @@ Both projects are MIT licensed.
 
 ## Status
 
-- Models: geometry, normals and tangents, two UV sets, vertex color, skinning, skeleton and LODs.
+- Models: geometry, normals and tangents, two UV sets, vertex color, skinning, skeleton and LODs. Cloth isn't
+  simulated (see the limits), so the vertices of a cloth's simulated nodes (`$cloth_m0p12`, bones the cloth compiler
+  puts at the skeleton's root that nothing animates) skin to what the cloth hangs from instead: the static nodes the
+  fewest rods away (its pins at a waist or shoulder), each with its own skinning (`m_SkelParents` and
+  `m_CtrlSoftOffsets`). Coats, skirts and capes follow the body as if skinned to it.
   Every model in the game decodes (6474 models, every LOD).
 - Textures: every format Deadlock uses. Every texture decodes (15085, all mips).
 - Materials: `pbr.vfx` (3187 materials: heroes and props) is ported. Albedo correction and tint, tint mask,
@@ -78,6 +82,10 @@ Both projects are MIT licensed.
   model data; pick one with `renderer.SetDeadlockBodyGroup( "head", "cocky" )` (or by index in the inspector).
   Meshes outside any body group go in a one-choice `autodefault` group, as Deadlock does, because a mesh added to
   every group would claim every choice's bit and break choosing.
+- Each mesh goes into the model once, with a mask of the LODs and body group choices it shows in (`ModelBuilder`'s
+  private masked `AddMesh`, by reflection): s&box converts a skinned mesh's bone indices every time the mesh is
+  added, so one added per LOD or choice ended up with them divided by the number of adds. Fencer, Celeste and Geist,
+  whose bodies are in two choices of a body group, animated on the wrong bones (right only in the bind pose).
 - Attachments (weapon hands, muzzles, ability cast points...) and hitbox sets, tagged with their hit group
   (`head`, `chest`, `stomach`, ...) like the Source mounts do.
 - Maps: all 20 in `game/citadel/maps` load as scenes, built the way the game builds them.
@@ -216,9 +224,10 @@ Both projects are MIT licensed.
   `2392_post_processing` volume, which lets the exposure adapt within half a stop, stays at its middle.
 - The bloom layer is 10 bit; materials write their bloom as a fraction of `DeadlockPostProcess.BloomLayerRange` (64),
   so brighter bloom clips there.
-- s&box vertices take 8 bit bone indices, so at most 256 bones can skin vertices. 19 hero models skin with
-  more. Their most influential bones (and parents) get the first 256 slots and the rest skin to their nearest
-  kept parent: identical in bind pose, but those bones won't deform on their own once animated.
+- s&box vertices take 8 bit bone indices, so at most 256 bones can skin vertices. With cloth bones skinned to
+  their anchors, three hero models (`abrams`, `mcginnis`, `ratking`) still skin with more. Their most influential bones
+  (and parents) get the first 256 slots and the rest skin to their nearest kept parent: identical in bind pose, but
+  those bones won't deform on their own once animated.
 - At most 4 bone weights per vertex; the strongest are kept.
 - Only meshes in the default mesh groups are imported; body groups and material groups (skins) are not.
 - Not yet imported: material groups (skins).
@@ -257,7 +266,11 @@ Both projects are MIT licensed.
   `DeadlockMount.Reduced.cs`), which takes them to about 1.25 GB. Its lightmaps, cubemaps, probes and fog keep
   their full detail, as does everything outside the map.
 - Cloth (`m_pFeModel`, 88 models) isn't simulated: s&box has no cloth solver (its native code only keeps Source 2's
-  schema types, and physics bones only cover bone-merged accessories), so it would take a custom simulation.
+  schema types, and physics bones only cover bone-merged accessories), so it would take a custom simulation. Until
+  then cloth follows its pins (`ModelImporter.Cloth.cs`): it moves with the body but doesn't swing, hang or collide.
+  The nodes' own animated pose isn't used, as long skirts skinned to it swing out with the legs (the game barely pulls
+  cloth toward it). Simulated bones inside the skeleton (tails, chains, ponytails) are left to the animation graph or
+  their bind pose under their parents. Simulating it means taking that out and driving the `$cloth` bones.
 - Morph wrinkle maps and speed (the `.w` channels of the morph bundles) are not used. Flex rules run on the
   CPU every frame, so only the component (not animation) drives controllers for now.
 - Legacy `VKV3` KeyValues and `vmesh_c` referenced meshes are not supported (Deadlock's main VPKs use neither).
