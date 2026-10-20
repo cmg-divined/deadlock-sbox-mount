@@ -6,7 +6,7 @@ It's not a Deadlock remake and I'm not trying to make one. There are no abilitie
 
 Nothing from the game is in this repo. The mount reads the files straight out of your own Deadlock install at runtime, so you need to own the game and have it installed on Steam. Please don't use this to rip assets and reupload them, or to publish s&box packages with Deadlock content in them.
 
-If anyone at Valve wants this taken down or changed, open an issue and I'll do it or contact me on disc via .divined
+If anyone at Valve wants this taken down or changed, open an issue and I'll do it or contact me on discord via .divined
 
 ## What you can do with it
 
